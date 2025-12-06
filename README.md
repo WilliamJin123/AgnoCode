@@ -7,7 +7,7 @@ TS better be done within the next month becuase I need this bad.
 ## Deployment
 
 - Web app
-- Local Applications
+- Local Application (Tauri or Electron)
 - OAuth with DBs to protect API keys, save user configs, 
 - Some good UI (I hope)
 - Javascript + Python API stack (look into Bun, how to make applications)
@@ -15,6 +15,9 @@ TS better be done within the next month becuase I need this bad.
 - Eventually (later) integrate with IDE extensions
 
 ## Claude Code Features
+
+### Memory, Commands, Hooks
+- Memory for system prompts (Claude.md)
 
 ### File System 
 - Access to your files: file search, reading 
@@ -49,12 +52,16 @@ TS better be done within the next month becuase I need this bad.
 
 ### Multi-Agent Architecture
 - Ability to parallelize agent tasks (inherent)
-- Options for detailed planning with or without HITL
+- Subagents (better designed, more readily used vs Claude Code)
+- Everything is in the name of making context LEAN
+- Options for detailed planning with or without HITL (equivalent to Claude Code's planning mode)
+- LATER: Build some pre-existing agent "profiles" (code reviewer, planner for UI, planner for Backend Infra, etc.) 
 
 ### Enhanced Search
 - Basic web search
 - Exa search
 - Git and GitHub repo searching (pyGithub)
+- Documentation Search: [Context7](https://github.com/upstash/context7) MCP for documentation (better yet, make it a custom agent skill) 
 
 ### Writing Code
 - Expect the agent to give plans and justify every change
@@ -68,11 +75,18 @@ TS better be done within the next month becuase I need this bad.
 - Support for ALL hyperparameters (top p, temperature, max_tokens, freq_penalty, etc.)
 - Config profiles for model presets and all options in general (ex. for zai-glm-4.6, temperature: 0.6 and max_completion_tokens: 5000)
 
-### Dynamic Knowledge Management
+### Dynamic Knowledge 
 - Dynamic knowledge graph for projects / directories using Graphiti + FalkorDB (handled by an ingestion agent and a query agent)
-- Also have a standard indexed DB perhaps
+
+### Memory, Commands, Hooks
+- Memory: Agno.md system prompts (ex. never use Any for Typescript)
+- [Commands](https://github.com/wshobson/commands/tree/main): Make command md files or scripts (commands directory? commands skill? we'll see)
+- Essentially have a system for setting "rules" (could be same as Claude Code, Windsurf, or could be my own setup)
 
 ### Plug and Play with existing Claude Code features
 - Complete integration of agent skills (guided file reads)
 - MCP Config file integration (dedicated MCP agent that routes to "MCP storage" agents that have sets of MCPs in context to minimize context bloat of main agent)
-- Integration of claude code plugins (we will see about this one)
+
+- Integration of [claude code plugins](https://claude-plugins.dev/skills) 
+- Very important as plugins contains Commands, Agent Sys Prompts, MCP config, Tools, and Skills
+- Use [Edmund's setup](https://github.com/edmund-io/edmunds-claude-code) to test Agno ingestion
