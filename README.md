@@ -77,6 +77,8 @@ TS better be done within the next month becuase I need this bad.
 
 ### Dynamic Knowledge 
 - Dynamic knowledge graph for projects / directories using Graphiti + FalkorDB (handled by an ingestion agent and a query agent)
+- Code Indexing for faster, better retrieval (investigate [this repo](https://github.com/jayminwest/kotadb))
+- GUI for knowledge graph
 
 ### Memory, Commands, Hooks
 - Memory: Agno.md system prompts (ex. never use Any for Typescript)
@@ -90,3 +92,8 @@ TS better be done within the next month becuase I need this bad.
 - Integration of [claude code plugins](https://claude-plugins.dev/skills) 
 - Very important as plugins contains Commands, Agent Sys Prompts, MCP config, Tools, and Skills
 - Use [Edmund's setup](https://github.com/edmund-io/edmunds-claude-code) to test Agno ingestion
+
+### Plug and Play with Agno
+- Port main AgnoOS features (knowledge, sessions, db, memory tabs)
+- Support for Agno agents, teams, workflows (hybrid of this with Claude Code)
+- 
