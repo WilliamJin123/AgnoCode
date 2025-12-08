@@ -58,11 +58,11 @@ TS better be done within the next month becuase I need this bad.
 - LATER: Build some pre-existing agent "profiles" (code reviewer, planner for UI, planner for Backend Infra, etc.) 
 
 ### Enhanced Search
-- Basic web search
+- Basic web search (for now, might even remove this just because its so naive)
 - Exa search
 - Git and GitHub repo searching (pyGithub)
 - Documentation Search: [Context7](https://github.com/upstash/context7) MCP for documentation (better yet, make it a custom agent skill) 
-- Browserbase / Stagehand Search **(tentative)**
+- Browserbase / [Stagehand](https://github.com/browserbase/stagehand) Search 
 
 ### Writing Code
 - Expect the agent to give plans and justify every change
