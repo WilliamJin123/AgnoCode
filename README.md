@@ -77,8 +77,9 @@ TS better be done within the next month becuase I need this bad.
 
 ### Dynamic Knowledge 
 - Dynamic knowledge graph for projects / directories using Graphiti + FalkorDB (handled by an ingestion agent and a query agent)
-- Code Indexing for faster, better retrieval (investigate [this repo](https://github.com/jayminwest/kotadb))
-- GUI for knowledge graph
+- Custom GUI for knowledge graph within the app
+- Code Indexing for faster, better retrieval (investigate [KotaDB: Code Intelligence Engine](https://github.com/jayminwest/kotadb))
+- Leverage LSP, other useful tools? [Serena: Coding Agent Toolkit](https://www.reddit.com/r/agno/s/oMaE1A5zqa)
 
 ### Memory, Commands, Hooks
 - Memory: Agno.md system prompts (ex. never use Any for Typescript)
@@ -96,4 +97,3 @@ TS better be done within the next month becuase I need this bad.
 ### Plug and Play with Agno
 - Port main AgnoOS features (knowledge, sessions, db, memory tabs)
 - Support for Agno agents, teams, workflows (hybrid of this with Claude Code)
-- 
