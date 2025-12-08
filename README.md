@@ -62,6 +62,7 @@ TS better be done within the next month becuase I need this bad.
 - Exa search
 - Git and GitHub repo searching (pyGithub)
 - Documentation Search: [Context7](https://github.com/upstash/context7) MCP for documentation (better yet, make it a custom agent skill) 
+- Browserbase / Stagehand Search **(tentative)**
 
 ### Writing Code
 - Expect the agent to give plans and justify every change
@@ -93,6 +94,8 @@ TS better be done within the next month becuase I need this bad.
 - Integration of [claude code plugins](https://claude-plugins.dev/skills) 
 - Very important as plugins contains Commands, Agent Sys Prompts, MCP config, Tools, and Skills
 - Use [Edmund's setup](https://github.com/edmund-io/edmunds-claude-code) to test Agno ingestion
+
+- Package Manager for skills and / or plugins **(tentative)**
 
 ### Plug and Play with Agno
 - Port main AgnoOS features (knowledge, sessions, db, memory tabs)
