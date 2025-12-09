@@ -51,11 +51,9 @@ TS better be done within the next month becuase I need this bad.
 - PyGithub tools (for reading, creating repos, cloning repos, etc.)
 
 ### Multi-Agent Architecture
-- Ability to parallelize agent tasks (inherent)
-- Subagents (better designed, more readily used vs Claude Code)
 - Everything is in the name of making context LEAN
 - Options for detailed planning with or without HITL (equivalent to Claude Code's planning mode)
-- LATER: Build some pre-existing agent "profiles" (code reviewer, planner for UI, planner for Backend Infra, etc.) 
+- Pre-existing agent "profiles" (code reviewer, planner for UI, planner for Backend Infra, etc.) 
 
 ### Enhanced Search
 - Basic web search (for now, might even remove this just because its so naive)
@@ -71,14 +69,13 @@ TS better be done within the next month becuase I need this bad.
 
 ### Model Agnosticism
 - Support for any OpenAI API-adhering models
-- Rate limiting
 - Multi API key cycling support (with limits tracking)
 - Support for ALL hyperparameters (top p, temperature, max_tokens, freq_penalty, etc.)
 - Config profiles for model presets and all options in general (ex. for zai-glm-4.6, temperature: 0.6 and max_completion_tokens: 5000)
 
 ### Dynamic Knowledge 
 - Dynamic knowledge graph for projects / directories using Graphiti + FalkorDB (handled by an ingestion agent and a query agent)
-- Custom GUI for knowledge graph within the app
+- [Script to check for hallucinations](https://github.com/coleam00/mcp-crawl4ai-rag/tree/main/knowledge_graphs) using the knowledge graph
 - Code Indexing for faster, better retrieval (investigate [KotaDB: Code Intelligence Engine](https://github.com/jayminwest/kotadb))
 - Leverage LSP, other useful tools? [Serena: Coding Agent Toolkit](https://www.reddit.com/r/agno/s/oMaE1A5zqa)
 
@@ -88,12 +85,10 @@ TS better be done within the next month becuase I need this bad.
 - Essentially have a system for setting "rules" (could be same as Claude Code, Windsurf, or could be my own setup)
 
 ### Plug and Play with existing Claude Code features
-- Complete integration of agent skills (guided file reads)
-- MCP Config file integration (dedicated MCP agent that routes to "MCP storage" agents that have sets of MCPs in context to minimize context bloat of main agent)
-
+- Complete integration of agent skills
+- MCP Config file integration (nested MCP agent routers)
 - Integration of [claude code plugins](https://claude-plugins.dev/skills) 
-- Very important as plugins contains Commands, Agent Sys Prompts, MCP config, Tools, and Skills
-- Use [Edmund's setup](https://github.com/edmund-io/edmunds-claude-code) to test Agno ingestion
+- Use [Edmund's setup](https://github.com/edmund-io/edmunds-claude-code) to test
 
 - Package Manager for skills and / or plugins **(tentative)**
 
