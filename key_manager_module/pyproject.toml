@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "api-key-rotater"  # This is the name users install via pip
+version = "0.1.0"
+authors = [
+  { name="William Jin", email="jinwilliam.jin@gmail.com" },
+]
+description = "A thread-safe key rotation and rate limiting manager for API keys."
+readme = "README.md"
+requires-python = ">=3.9"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Development Status :: 3 - Alpha",
+]
+dependencies = [
+    # Required dependency for .env loading
+    "python-dotenv", 
+]
+
+[tool.setuptools.packages]
+# This tells setuptools to find packages inside the current directory.
+# Since your module is called 'env_keys', that's what will be packaged.
+find = {} 
+
+# If you want to explicitly declare it:
+# packages = ["env_keys"]

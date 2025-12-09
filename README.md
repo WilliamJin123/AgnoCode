@@ -67,11 +67,12 @@ TS better be done within the next month becuase I need this bad.
 - Optionality for full rewrites, diffs, suggestions
 
 
-### Model Agnosticism
+### Models
 - Support for any OpenAI API-adhering models
 - Multi API key cycling support (with limits tracking)
 - Support for ALL hyperparameters (top p, temperature, max_tokens, freq_penalty, etc.)
 - Config profiles for model presets and all options in general (ex. for zai-glm-4.6, temperature: 0.6 and max_completion_tokens: 5000)
+- IN THE FUTURE: RL with smaller models for specific tasks to beat out frontier models using [Verifiers from PrimeIntellect](https://github.com/PrimeIntellect-ai/verifiers)
 
 ### Dynamic Knowledge 
 - Dynamic knowledge graph for projects / directories using Graphiti + FalkorDB (handled by an ingestion agent and a query agent)
@@ -90,7 +91,7 @@ TS better be done within the next month becuase I need this bad.
 - Integration of [claude code plugins](https://claude-plugins.dev/skills) 
 - Use [Edmund's setup](https://github.com/edmund-io/edmunds-claude-code) to test
 
-- Package Manager for skills and / or plugins **(tentative)**
+- Package Manager for skills and / or plugins: make my own or use [craftdesk](https://github.com/mensfeld/craftdesk)
 
 ### Plug and Play with Agno
 - Port main AgnoOS features (knowledge, sessions, db, memory tabs)
