@@ -55,7 +55,7 @@ async def main():
             print(f"-> Key **...{key_usage.api_key[-8:]}** selected. Sending request...")
             
             start_time = time.time()
-            response = agent.print_response(request_prompt, stream=True)
+            response = await agent.aprint_response(request_prompt, stream=True)
             duration = time.time() - start_time
 
         except RuntimeError as e:

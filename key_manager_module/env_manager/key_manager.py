@@ -161,6 +161,43 @@ class KeyUsage:
             self.tokens_day.append((now, tokens_used))
             self.total_tokens += tokens_used
 
+@dataclass
+class UtilizationStats:
+    """Formatted strings showing usage vs limits (e.g. '50/1000')"""
+    rpm: str
+    rph: str
+    rpd: str
+    
+@dataclass
+class KeyStats:
+    """Statistics for a single API key"""
+    key_index: int
+    key_suffix: str
+    
+    # Raw counts
+    current_rpm: int
+    current_rph: int
+    current_rpd: int
+    current_tpm: int
+    current_tph: int
+    current_tpd: int
+    
+    total_requests: int
+    total_tokens: int
+    
+    # Formatted utilization strings
+    utilization: UtilizationStats
+
+@dataclass
+class ProviderStats:
+    """Overall statistics for the provider wrapper"""
+    provider: str
+    total_keys: int
+    current_key_index: int
+    total_requests: int
+    total_tokens: int
+    keys: List[KeyStats]
+
 class RotatingKeyManager:
     """Manages API key rotation with rate limiting"""
     CLEANUP_INTERVAL_SECONDS = 60
@@ -248,45 +285,59 @@ class RotatingKeyManager:
                     self.db.record_usage(self.provider_name, key.api_key, tokens_used)
                     break
     
-    def get_stats(self, start = 1, end = None) -> Dict[str, Any]:
-        """Get overall statistics"""
-        start_idx = max(start - 1, 0)
+    def get_stats(self, start: int = 1, end: Optional[int] = None) -> ProviderStats:
+        """Get overall statistics as a structured dataclass"""
+        
+        # Handle 0-based indexing safety
+        start_idx = max(start-1, 0)
         end_idx = end if end is not None else len(self.keys)
         
         with self.lock:
+            # Slice the keys we want to inspect
             sliced_keys = self.keys[start_idx:end_idx]
+            
+            # Calculate totals for just the sliced view
             total_requests = sum(k.total_requests for k in sliced_keys)
             total_tokens = sum(k.total_tokens for k in sliced_keys)
             
-            key_stats = []
-            for i, key in enumerate(sliced_keys, start=start):
-                usage = key.get_current_usage()
-                key_stats.append({
-                    'key_index': i,
-                    'key_suffix': key.api_key[-8:] if len(key.api_key) > 8 else '***',
-                    'current_rpm': usage['requests_per_minute'],
-                    'current_rph': usage['requests_per_hour'],
-                    'current_rpd': usage['requests_per_day'],
-                    'current_tpm': usage['tokens_per_minute'],
-                    'current_tph': usage['tokens_per_hour'],
-                    'current_tpd': usage['tokens_per_day'],
-                    'total_requests': usage['total_requests'],
-                    'total_tokens': usage['total_tokens'],
-                    'utilization': {
-                        'rpm': f"{usage['requests_per_minute']}/{self.rate_limits.requests_per_minute}",
-                        'rph': f"{usage['requests_per_hour']}/{self.rate_limits.requests_per_hour}",
-                        'rpd': f"{usage['requests_per_day']}/{self.rate_limits.requests_per_day}",
-                    }
-                })
+            key_stats_list = []
             
-            return {
-                'provider': self.provider_name,
-                'total_keys': len(self.keys),
-                'current_key_index': self.current_key_index,
-                'total_requests': total_requests,
-                'total_tokens': total_tokens,
-                'keys': key_stats
-            }
+            # Enumerate using the actual index relative to the full list
+            for i, key in enumerate(sliced_keys, start=start_idx):
+                usage = key.get_current_usage()
+                
+                # Create the inner Utilization dataclass
+                util_stats = UtilizationStats(
+                    rpm=f"{usage['requests_per_minute']}/{self.rate_limits.requests_per_minute}",
+                    rph=f"{usage['requests_per_hour']}/{self.rate_limits.requests_per_hour}",
+                    rpd=f"{usage['requests_per_day']}/{self.rate_limits.requests_per_day}"
+                )
+                
+                # Create the KeyStats dataclass
+                k_stat = KeyStats(
+                    key_index=i,
+                    key_suffix=key.api_key[-8:] if len(key.api_key) > 8 else '***',
+                    current_rpm=usage['requests_per_minute'],
+                    current_rph=usage['requests_per_hour'],
+                    current_rpd=usage['requests_per_day'],
+                    current_tpm=usage['tokens_per_minute'],
+                    current_tph=usage['tokens_per_hour'],
+                    current_tpd=usage['tokens_per_day'],
+                    total_requests=usage['total_requests'],
+                    total_tokens=usage['total_tokens'],
+                    utilization=util_stats
+                )
+                key_stats_list.append(k_stat)
+            
+            # Return the top-level ProviderStats dataclass
+            return ProviderStats(
+                provider=self.provider_name,
+                total_keys=len(self.keys),
+                current_key_index=self.current_key_index,
+                total_requests=total_requests,
+                total_tokens=total_tokens,
+                keys=key_stats_list
+            )
        
     def wait_for_availability(self, estimated_tokens: int = 0, timeout: float = 10) -> Optional[KeyUsage]:
         """Wait for an available key, with timeout"""
@@ -682,32 +733,33 @@ class MultiProviderWrapper:
     def record_usage(self, api_key: str, tokens_used: int = 0):
         self.key_manager.record_usage(api_key, tokens_used)
       
-    def get_stats(self, start = 0, end = None) -> Dict[str, Any]:
+    def get_stats(self, start: int = 1, end: Optional[int] = None) -> ProviderStats:
         return self.key_manager.get_stats(start, end)
     
-    def print_stats(self, start = 0, end = None):
-        """Print formatted statistics"""
+    def print_stats(self, start: int = 1, end: Optional[int] = None):
+        """Print formatted statistics using dot notation"""
         stats = self.get_stats(start, end)
+        
         print(f"\n{'='*80}")
-        print(f"{stats['provider'].upper()} Statistics")
+        print(f"{stats.provider.upper()} Statistics")
         print(f"{'='*80}")
-        print(f"Total Keys: {stats['total_keys']}")
-        print(f"Current Key: {stats['current_key_index']}")
-        print(f"Total Requests: {stats['total_requests']:,}")
-        print(f"Total Tokens: {stats['total_tokens']:,}")
+        print(f"Total Keys: {stats.total_keys}")
+        print(f"Current Key Index: {stats.current_key_index}")
+        print(f"Total Requests: {stats.total_requests:,}")
+        print(f"Total Tokens: {stats.total_tokens:,}")
         print(f"\nPer-Key Breakdown:")
         print(f"{'-'*80}")
         
-        for key_stat in stats['keys']:
-            print(f"\nKey #{key_stat['key_index']} (...{key_stat['key_suffix']})")
-            print(f"  Current: {key_stat['utilization']['rpm']} RPM | "
-                  f"{key_stat['utilization']['rph']} RPH | "
-                  f"{key_stat['utilization']['rpd']} RPD")
-            print(f"  Tokens: {key_stat['current_tpm']:,} TPM | "
-                  f"{key_stat['current_tph']:,} TPH | "
-                  f"{key_stat['current_tpd']:,} TPD")
-            print(f"  Total: {key_stat['total_requests']:,} requests | "
-                  f"{key_stat['total_tokens']:,} tokens")
+        for key_stat in stats.keys:
+            print(f"\nKey #{start} (...{key_stat.key_suffix})")
+            print(f"  Current: {key_stat.utilization.rpm} RPM | "
+                  f"{key_stat.utilization.rph} RPH | "
+                  f"{key_stat.utilization.rpd} RPD")
+            print(f"  Tokens: {key_stat.current_tpm:,} TPM | "
+                  f"{key_stat.current_tph:,} TPH | "
+                  f"{key_stat.current_tpd:,} TPD")
+            print(f"  Total: {key_stat.total_requests:,} requests | "
+                  f"{key_stat.total_tokens:,} tokens")
         
 if __name__ == "__main__":
     

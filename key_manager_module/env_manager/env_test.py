@@ -15,18 +15,21 @@ cerebras_wrapper = MultiProviderWrapper.from_env(
     # Pass model-specific kwargs
     temperature=0.7,
     max_completion_tokens=512,
+    env_file="./local.env"
 )
 
 groq_wrapper = MultiProviderWrapper.from_env(
     provider='groq',
     model_class=Groq,
     model_id='llama-3.3-70b-versatile',
+    env_file="./local.env"
 )
 
 gemini_wrapper = MultiProviderWrapper.from_env(
     provider='gemini',
     model_class=Gemini,
     model_id='gemini-2.5-flash',
+    env_file="./local.env"
 )
 
 
@@ -49,7 +52,7 @@ async def main():
             print(f"-> Key **...{key_usage.api_key[-8:]}** selected. Sending request...")
             
             start_time = time.time()
-            response = agent.print_response(request_prompt, stream=True)
+            response = await agent.aprint_response(request_prompt, stream=True)
             duration = time.time() - start_time
 
         except RuntimeError as e:
