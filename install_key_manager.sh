@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # --- Configuration ---
-VENV_NAME="venv"
+VENV_NAME=".venv"
 MODULE_DIR="key_manager_module"
 WHEEL_FILE="dist/api_key_rotater-0.1.0-py3-none-any.whl"
 
@@ -69,6 +69,6 @@ fi
 echo "--- Deployment Complete ---"
 echo "Module built and installed successfully."
 
-cd.. # Return to the original directory
+cd .. # Return to the original directory
 
 # chmod +x install_key_manager.sh

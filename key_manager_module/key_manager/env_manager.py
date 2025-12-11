@@ -51,7 +51,7 @@ class UsageDatabase:
         self.db_path = db_path
         self._init_db()
     def _init_db(self):
-        with sqlite3.connect(self.db_path) as conn:
+        with sqlite3.connect(self.db_path, check_same_thread=False) as conn:
             # Create table for request logs
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS usage_logs (
@@ -85,7 +85,7 @@ class UsageDatabase:
     def record_usage(self, provider: str, model: str, api_key: str, tokens: int):
         """Log a single request to the DB"""
         suffix = api_key[-8:] if len(api_key) > 8 else api_key
-        with sqlite3.connect(self.db_path) as conn:
+        with sqlite3.connect(self.db_path, check_same_thread=False) as conn:
             conn.execute(
                 "INSERT INTO usage_logs (provider, model, api_key_suffix, timestamp, tokens) VALUES (?, ?, ?, ?, ?)",
                 (provider, model, suffix, time.time(), tokens)
@@ -96,7 +96,7 @@ class UsageDatabase:
         suffix = api_key[-8:] if len(api_key) > 8 else api_key
         cutoff = time.time() - seconds_lookback
         
-        with sqlite3.connect(self.db_path) as conn:
+        with sqlite3.connect(self.db_path, check_same_thread=False) as conn:
             cursor = conn.execute(
                 """
                 SELECT model, timestamp, tokens FROM usage_logs 
@@ -110,7 +110,7 @@ class UsageDatabase:
     def prune_old_records(self, days_retention: int = 3):
         """Delete records older than retention period to keep DB small (3 days)"""
         cutoff = time.time() - (days_retention * 86400)
-        with sqlite3.connect(self.db_path) as conn:
+        with sqlite3.connect(self.db_path, check_same_thread=False) as conn:
             conn.execute("DELETE FROM usage_logs WHERE timestamp < ?", (cutoff,))
 
 # --- 3. USAGE TRACKING LOGIC ---
@@ -667,9 +667,9 @@ class MultiProviderWrapper:
 
         api_keys = []
         for i in range(1, num_keys + 1):
-            key_var = f"{provider}_api_key_{i}"
+            key_var = f"{provider.upper()}_API_KEY_{i}"
             key = os.getenv(key_var)
-            if not key: raise ValueError(f"Missing API key: {provider}_api_key_{i}")
+            if not key: raise ValueError(f"Missing API key: {provider.upper()}_API_KEY_{i}")
             api_keys.append(key)
         return api_keys
     

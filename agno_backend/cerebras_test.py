@@ -20,7 +20,7 @@ cerebras_wrapper = MultiProviderWrapper.from_env(
         # max_completion_tokens=MAX_TOKENS  # Kwarg passed to model
     )
 
-load_dotenv(ENV_FILE)
+load_dotenv(ENV_FILE, override=True)
 
 if __name__ == "__main__":
     
