@@ -38,6 +38,11 @@ My attempt to port Claude Code so I can use my free API keys instead of Claude. 
 
 # Agno Code Extensions (Beyond Claude Code)
 
+### Personal Assistant Agent
+- Separate agent that follows along with Agno Code's outputs / operations from the user's perspective
+- Answers conceptual questions / clarifications (ex. what does this code snippet do, what is this syntax exactly, etc.) without diluting workflow context
+- Potentially: Redefine user prompts, intermediary between user and Agno Code
+
 ### Shell Tools
 - Package management: npm, pip, etc. (guided shell tools)
 - Testing and debugging (guided shell tools, file operations: Pytest, Jest, JUnit, etc.)
@@ -64,7 +69,6 @@ My attempt to port Claude Code so I can use my free API keys instead of Claude. 
 ### Writing Code
 - Expect the agent to give plans and justify every change
 - Optionality for full rewrites, diffs, suggestions
-
 
 ### Models
 - Support for any OpenAI API-adhering models
