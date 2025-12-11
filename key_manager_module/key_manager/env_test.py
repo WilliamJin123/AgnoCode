@@ -1,4 +1,4 @@
-from key_manager import MultiProviderWrapper
+from key_manager_module.key_manager.env_manager import MultiProviderWrapper
 import time
 
 from agno.agent import Agent

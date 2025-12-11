@@ -2,8 +2,6 @@
 
 My attempt to port Claude Code so I can use my free API keys instead of Claude. (Who doesn't love free?)
 
-TS better be done within the next month becuase I need this bad.
-
 ## Deployment
 
 - Web app
@@ -53,7 +51,8 @@ TS better be done within the next month becuase I need this bad.
 ### Multi-Agent Architecture
 - Everything is in the name of making context LEAN
 - Options for detailed planning with or without HITL (equivalent to Claude Code's planning mode)
-- Pre-existing agent "profiles" (code reviewer, planner for UI, planner for Backend Infra, etc.) 
+- Experiment with Swarm, Evolutionary, Genetic, and other algorithms
+- Create a memory framework that unifies tools / toolkits, behavioural profiles (system prompts, instructions), knowledge (additional context, RAG-related information), client preferences (what each user needs), sessions (session state, session summaries), temporal context, and adaptive / iterative learning mechanisms
 
 ### Enhanced Search
 - Basic web search (for now, might even remove this just because its so naive)
