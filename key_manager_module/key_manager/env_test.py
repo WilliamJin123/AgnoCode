@@ -5,23 +5,19 @@ from agno.agent import Agent
 from agno.models.cerebras import Cerebras
 from agno.models.groq import Groq
 from agno.models.google import Gemini
-from agno.utils.pprint import pprint_run_response
-
 
 cerebras_wrapper = MultiProviderWrapper.from_env(
     provider='cerebras',
     model_class=Cerebras, 
-    model_id='llama3.1-8b',
-    # Pass model-specific kwargs
+    default_model_id='llama3.1-8b', 
     temperature=0.7,
-    max_completion_tokens=512,
     env_file="./local.env"
 )
 
 groq_wrapper = MultiProviderWrapper.from_env(
     provider='groq',
     model_class=Groq,
-    model_id='llama-3.3-70b-versatile',
+    default_model_id='llama-3.3-70b-versatile',
     env_file="./local.env"
 )
 
@@ -45,11 +41,11 @@ async def main():
         print(f"\n{'='*20} RUNNING {provider_name.upper()} {'='*20}")
         
         try:
-            model, key_usage = wrapper.get_model(estimated_tokens=500, wait=True, timeout=20)
+            model = wrapper.get_model(estimated_tokens=500, wait=True, timeout=20)
             
             agent = Agent(model=model, markdown=True)
             
-            print(f"-> Key **...{key_usage.api_key[-8:]}** selected. Sending request...")
+            print(f"-> Key **...{model.api_key[-8:]}** selected. Sending request...")
             
             start_time = time.time()
             response = await agent.aprint_response(request_prompt, stream=True)
@@ -60,9 +56,9 @@ async def main():
         except Exception as e:
             print(f"-> FAILED: An API or network error occurred: {e}")
 
-    for wrapper in wrappers.values():
-        print("Printing stats")
-        wrapper.print_stats(start=1, end=1)
+    for provider_name, wrapper in wrappers.items():
+        print(f"Printing stats for {provider_name}")
+        wrapper.print_global_stats()
     
 if __name__ == "__main__":
     import asyncio

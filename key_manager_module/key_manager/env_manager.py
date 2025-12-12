@@ -370,276 +370,92 @@ class RotatingKeyManager:
             
             return KeySummary(index=idx, suffix=suffix, snapshot=snap)
 
+class RotatingCredentialsMixin:
+    """
+    A universal Mixin that forces a key rotation and client rebuild
+    before every single model invocation.
+    """
+    def _rotate_credentials(self):
+        wait = getattr(self, '_rotating_wait', True)
+        timeout = getattr(self, '_rotating_timeout', 10)
+        estimated_tokens = getattr(self, '_estimated_tokens', 0)
+
+        key_usage: KeyUsage = self.wrapper.get_key_usage(
+            model_id=self.id, 
+            estimated_tokens=estimated_tokens,
+            wait=wait,
+            timeout=timeout
+        )
+
+        self.api_key = key_usage.api_key
+        if hasattr(self, "client"):
+            self.client = None
+        if hasattr(self, "async_client"):
+            self.async_client = None
+        if hasattr(self, "gemini_client"):
+            self.gemini_client = None
+
+    def invoke(self, *args, **kwargs):
+        self._rotate_credentials()
+        return super().invoke(*args, **kwargs)
+
+    async def ainvoke(self, *args, **kwargs):
+        self._rotate_credentials()
+        return await super().ainvoke(*args, **kwargs)
+    
+    def invoke_stream(self, *args, **kwargs):
+        self._rotate_credentials()
+        yield from super().invoke_stream(*args, **kwargs)
+
+    async def ainvoke_stream(self, *args, **kwargs):
+        self._rotate_credentials()
+        async for chunk in super().ainvoke_stream(*args, **kwargs):
+            yield chunk
+
 class MultiProviderWrapper:
     """Wrapper for Agno models with rotating API keys"""
     
     MODEL_LIMITS = {
         'cerebras': {
-            'gpt-oss-120b': RateLimits(
-                requests_per_minute=30,
-                requests_per_hour=900,
-                requests_per_day=14400,
-                tokens_per_minute=60000,
-                tokens_per_hour=1000000,
-                tokens_per_day=1000000,
-            ),
-            'llama3.1-8b': RateLimits(
-                requests_per_minute=30,
-                requests_per_hour=900,
-                requests_per_day=14400,
-                tokens_per_minute=60000,
-                tokens_per_hour=1000000,
-                tokens_per_day=1000000,
-            ),
-            'llama-3.3-70b': RateLimits(
-                requests_per_minute=30,
-                requests_per_hour=900,
-                requests_per_day=14400,
-                tokens_per_minute=60000,
-                tokens_per_hour=1000000,
-                tokens_per_day=1000000,
-            ),
-            'qwen-3-32b': RateLimits(
-                requests_per_minute=30,
-                requests_per_hour=900,
-                requests_per_day=14400,
-                tokens_per_minute=60000,
-                tokens_per_hour=1000000,
-                tokens_per_day=1000000,
-            ),
-            'qwen-3-235b-a22b-instruct-2507': RateLimits(
-                requests_per_minute=30,
-                requests_per_hour=900,
-                requests_per_day=14400,
-                tokens_per_minute=60000,
-                tokens_per_hour=1000000,
-                tokens_per_day=1000000,
-            ),
-            'zai-glm-4.6': RateLimits(
-                requests_per_minute=10,
-                requests_per_hour=100,
-                requests_per_day=100,
-                tokens_per_minute=150000,
-                tokens_per_hour=1000000,
-                tokens_per_day=1000000,
-            ),
+            'gpt-oss-120b': RateLimits(30, 900, 14400, 60000, 1000000, 1000000),
+            'llama3.1-8b': RateLimits(30, 900, 14400, 60000, 1000000, 1000000),
+            'llama-3.3-70b': RateLimits(30, 900, 14400, 60000, 1000000, 1000000),
+            'qwen-3-32b': RateLimits(30, 900, 14400, 60000, 1000000, 1000000),
+            'qwen-3-235b-a22b-instruct-2507': RateLimits(30, 900, 14400, 60000, 1000000, 1000000),
+            'zai-glm-4.6': RateLimits(10, 100, 100, 150000, 1000000, 1000000),
         },
         'groq': {
-            'allam-2-7b': RateLimits(
-                requests_per_minute=30,
-                requests_per_hour=1800,
-                requests_per_day=7000,
-                tokens_per_minute=6000,
-                tokens_per_hour=360000,
-                tokens_per_day=500000,
-            ),
-            'groq/compound': RateLimits(
-                requests_per_minute=30,
-                requests_per_hour=250,
-                requests_per_day=250,
-                tokens_per_minute=70000,
-            ),
-            'groq/compound-mini': RateLimits(
-                requests_per_minute=30,
-                requests_per_hour=250,
-                requests_per_day=250,
-                tokens_per_minute=70000,
-            ),
-            'llama-3.1-8b-instant': RateLimits(
-                requests_per_minute=30,
-                requests_per_hour=1800,
-                requests_per_day=14400,
-                tokens_per_minute=6000,
-                tokens_per_hour=360000,
-                tokens_per_day=500000,
-            ),
-            'llama-3.3-70b-versatile': RateLimits(
-                requests_per_minute=30,
-                requests_per_hour=1000,
-                requests_per_day=1000,
-                tokens_per_minute=12000,
-                tokens_per_hour=720000,
-                tokens_per_day=100000,
-            ),
-            'meta-llama/llama-4-maverick-17b-128e-instruct': RateLimits(
-                requests_per_minute=30,
-                requests_per_hour=1000,
-                requests_per_day=1000,
-                tokens_per_minute=6000,
-                tokens_per_hour=360000,
-                tokens_per_day=500000,
-            ),
-            'meta-llama/llama-4-scout-17b-16e-instruct': RateLimits(
-                requests_per_minute=30,
-                requests_per_hour=1000,
-                requests_per_day=1000,
-                tokens_per_minute=30000,
-                tokens_per_hour=1800000,
-                tokens_per_day=500000,
-            ),
-            'meta-llama/llama-guard-4-12b': RateLimits(
-                requests_per_minute=30,
-                requests_per_hour=1800,
-                requests_per_day=14400,
-                tokens_per_minute=15000,
-                tokens_per_hour=900000,
-                tokens_per_day=500000,
-            ),
-            'meta-llama/llama-prompt-guard-2-22m': RateLimits(
-                requests_per_minute=30,
-                requests_per_hour=1800,
-                requests_per_day=14400,
-                tokens_per_minute=15000,
-                tokens_per_hour=900000,
-                tokens_per_day=500000,
-            ),
-            'meta-llama/llama-prompt-guard-2-86m': RateLimits(
-                requests_per_minute=30,
-                requests_per_hour=1800,
-                requests_per_day=14400,
-                tokens_per_minute=15000,
-                tokens_per_hour=900000,
-                tokens_per_day=500000,
-            ),
-            'moonshotai/kimi-k2-instruct': RateLimits(
-                requests_per_minute=60,
-                requests_per_hour=1000,
-                requests_per_day=1000,
-                tokens_per_minute=10000,
-                tokens_per_hour=600000,
-                tokens_per_day=300000,
-            ),
-            'moonshotai/kimi-k2-instruct-0905': RateLimits(
-                requests_per_minute=60,
-                requests_per_hour=1000,
-                requests_per_day=1000,
-                tokens_per_minute=10000,
-                tokens_per_hour=600000,
-                tokens_per_day=300000,
-            ),
-            'openai/gpt-oss-120b': RateLimits(
-                requests_per_minute=30,
-                requests_per_hour=1000,
-                requests_per_day=1000,
-                tokens_per_minute=8000,
-                tokens_per_hour=480000,
-                tokens_per_day=200000,
-            ),
-            'openai/gpt-oss-20b': RateLimits(
-                requests_per_minute=30,
-                requests_per_hour=1000,
-                requests_per_day=1000,
-                tokens_per_minute=8000,
-                tokens_per_hour=480000,
-                tokens_per_day=200000,
-            ),
-            'openai/gpt-oss-safeguard-20b': RateLimits(
-                requests_per_minute=30,
-                requests_per_hour=1000,
-                requests_per_day=1000,
-                tokens_per_minute=8000,
-                tokens_per_hour=480000,
-                tokens_per_day=200000,
-            ),
-            'playai-tts': RateLimits(
-                requests_per_minute=10,
-                requests_per_hour=100,
-                requests_per_day=100,
-                tokens_per_minute=1200,
-                tokens_per_hour=72000,
-                tokens_per_day=3600,
-            ),
-            'playai-tts-arabic': RateLimits(
-                requests_per_minute=10,
-                requests_per_hour=100,
-                requests_per_day=100,
-                tokens_per_minute=1200,
-                tokens_per_hour=72000,
-                tokens_per_day=3600,
-            ),
-            'qwen/qwen3-32b': RateLimits(
-                requests_per_minute=60,
-                requests_per_hour=1000,
-                requests_per_day=1000,
-                tokens_per_minute=6000,
-                tokens_per_hour=360000,
-                tokens_per_day=500000,
-            ),
-            'whisper-large-v3': RateLimits(
-                requests_per_minute=20,
-                requests_per_hour=2000,
-                requests_per_day=2000,
-            ),
-            'whisper-large-v3-turbo': RateLimits(
-                requests_per_minute=20,
-                requests_per_hour=2000,
-                requests_per_day=2000,
-            ),
+            'allam-2-7b': RateLimits(30, 1800, 7000, 6000, 360000, 500000),
+            'groq/compound': RateLimits(30, 250, 250, 70000, None, None),
+            'groq/compound-mini': RateLimits(30, 250, 250, 70000, None, None),
+            'llama-3.1-8b-instant': RateLimits(30, 1800, 14400, 6000, 360000, 500000),
+            'llama-3.3-70b-versatile': RateLimits(30, 1000, 1000, 12000, 720000, 100000),
+            'meta-llama/llama-4-maverick-17b-128e-instruct': RateLimits(30, 1000, 1000, 6000, 360000, 500000),
+            'meta-llama/llama-4-scout-17b-16e-instruct': RateLimits(30, 1000, 1000, 30000, 1800000, 500000),
+            'meta-llama/llama-guard-4-12b': RateLimits(30, 1800, 14400, 15000, 900000, 500000),
+            'meta-llama/llama-prompt-guard-2-22m': RateLimits(30, 1800, 14400, 15000, 900000, 500000),
+            'meta-llama/llama-prompt-guard-2-86m': RateLimits(30, 1800, 14400, 15000, 900000, 500000),
+            'moonshotai/kimi-k2-instruct': RateLimits(60, 1000, 1000, 10000, 600000, 300000),
+            'moonshotai/kimi-k2-instruct-0905': RateLimits(60, 1000, 1000, 10000, 600000, 300000),
+            'openai/gpt-oss-120b': RateLimits(30, 1000, 1000, 8000, 480000, 200000),
+            'openai/gpt-oss-20b': RateLimits(30, 1000, 1000, 8000, 480000, 200000),
+            'openai/gpt-oss-safeguard-20b': RateLimits(30, 1000, 1000, 8000, 480000, 200000),
+            'playai-tts': RateLimits(10, 100, 100, 1200, 72000, 3600),
+            'playai-tts-arabic': RateLimits(10, 100, 100, 1200, 72000, 3600),
+            'qwen/qwen3-32b': RateLimits(60, 1000, 1000, 6000, 360000, 500000),
+            'whisper-large-v3': RateLimits(20, 2000, 2000),
+            'whisper-large-v3-turbo': RateLimits(20, 2000, 2000),
         },
         'gemini': {
-            'gemini-2.5-flash': RateLimits(
-                requests_per_minute=5,
-                requests_per_hour=300,
-                requests_per_day=20,
-                tokens_per_minute=250000,
-                tokens_per_hour=15000000,
-            ),
-            'gemini-2.5-flash-lite': RateLimits(
-                requests_per_minute=10,
-                requests_per_hour=600,
-                requests_per_day=20,
-                tokens_per_minute=250000,
-                tokens_per_hour=15000000,
-            ),
-            'gemini-2.5-flash-tts': RateLimits(
-                requests_per_minute=3,
-                requests_per_hour=180,
-                requests_per_day=10,
-                tokens_per_minute=10000,
-                tokens_per_hour=600000,
-            ),
-            'gemini-robotics-er-1.5-preview': RateLimits(
-                requests_per_minute=10,
-                requests_per_hour=600,
-                requests_per_day=250,
-                tokens_per_minute=250000,
-                tokens_per_hour=15000000,
-            ),
-            'gemma-3-12b': RateLimits(
-                requests_per_minute=30,
-                requests_per_hour=1800,
-                requests_per_day=14400,
-                tokens_per_minute=15000,
-                tokens_per_hour=900000,
-            ),
-            'gemma-3-1b': RateLimits(
-                requests_per_minute=30,
-                requests_per_hour=1800,
-                requests_per_day=14400,
-                tokens_per_minute=15000,
-                tokens_per_hour=900000,
-            ),
-            'gemma-3-27b': RateLimits(
-                requests_per_minute=30,
-                requests_per_hour=1800,
-                requests_per_day=14400,
-                tokens_per_minute=15000,
-                tokens_per_hour=900000,
-            ),
-            'gemma-3-2b': RateLimits(
-                requests_per_minute=30,
-                requests_per_hour=1800,
-                requests_per_day=14400,
-                tokens_per_minute=15000,
-                tokens_per_hour=900000,
-            ),
-            'gemma-3-4b': RateLimits(
-                requests_per_minute=30,
-                requests_per_hour=1800,
-                requests_per_day=14400,
-                tokens_per_minute=15000,
-                tokens_per_hour=900000,
-            ),
+            'gemini-2.5-flash': RateLimits(5, 300, 20, 250000, 15000000),
+            'gemini-2.5-flash-lite': RateLimits(10, 600, 20, 250000, 15000000),
+            'gemini-2.5-flash-tts': RateLimits(3, 180, 10, 10000, 600000),
+            'gemini-robotics-er-1.5-preview': RateLimits(10, 600, 250, 250000, 15000000),
+            'gemma-3-12b': RateLimits(30, 1800, 14400, 15000, 900000),
+            'gemma-3-1b': RateLimits(30, 1800, 14400, 15000, 900000),
+            'gemma-3-27b': RateLimits(30, 1800, 14400, 15000, 900000),
+            'gemma-3-2b': RateLimits(30, 1800, 14400, 15000, 900000),
+            'gemma-3-4b': RateLimits(30, 1800, 14400, 15000, 900000),
         },
     }
     
@@ -656,10 +472,7 @@ class MultiProviderWrapper:
         num_keys_var = f"NUM_{provider.upper()}"
         num_keys = os.getenv(num_keys_var)
         if not num_keys:
-            raise ValueError(
-                f"Environment variable '{num_keys_var}' not found. "
-                f"Please set it in your .env file or environment."
-            )
+            raise ValueError(f"Environment variable '{num_keys_var}' not found.")
         try:
             num_keys = int(num_keys)
         except ValueError:
@@ -688,42 +501,63 @@ class MultiProviderWrapper:
         self.manager = RotatingKeyManager(api_keys, self.provider, db_path)
         self._model_cache = {}
 
-    def get_model(self, estimated_tokens: int = 0, wait: bool = True, timeout: float = 10, **kwargs):
-        """Get a model instance with an available API key"""
-        model_id = kwargs.get('id', self.default_model_id)
+    def get_key_usage(self, model_id: str = None, estimated_tokens: int = 0, wait: bool = True, timeout: float = 10):
+        """Finds a valid key"""
+        mid = model_id or self.default_model_id
+
         provider_limits = self.MODEL_LIMITS.get(self.provider, {})
-        limits = provider_limits.get(model_id)
+        limits = provider_limits.get(mid)
         if not limits:
-            print(f"Warning: No limits for {model_id}, using default.")
+            print(f"Warning: No limits for {mid}, using default.")
             limits = RateLimits(10, 100, 1000)
-        
+
         start = time.time()
         while True:
-            key_usage = self.manager.get_key(model_id, limits, estimated_tokens)
-            if key_usage: break
+            key_usage = self.manager.get_key(mid, limits, estimated_tokens)
+            if key_usage: 
+                return key_usage
+            if not wait:
+                    raise RuntimeError(f"No available API keys for {self.provider}/{mid} (wait=False)") 
+            if time.time() - start > timeout:
+                raise RuntimeError(f"Timeout: No available API keys for {self.provider}/{mid} after {timeout}s")
+            time.sleep(0.5)
 
-            if not wait or (time.time() - start > timeout):
-                raise RuntimeError(f"No available API keys for {self.provider}/{model_id}{f' (waited {timeout}s)' if wait else ''}")
-            time.sleep(0.1)
+    def get_model(self, estimated_tokens: int = 0, wait: bool = True, timeout: float = 10, **kwargs):
+        """Dynamically creates a rotating model for ANY provider."""
+        model_id = kwargs.get('id', self.default_model_id)  
         
-        # We must cache by (api_key + model_id) because the same key object serves multiple models
-        cache_key = f"{key_usage.api_key}::{model_id}"
-        
-        if cache_key not in self._model_cache:
-            final_kwargs = {**self.model_kwargs, **kwargs}
+        RotatingProviderClass = type(
+            f"Rotating{self.model_class.__name__}", 
+            (RotatingCredentialsMixin, self.model_class), 
+            {}
+        )
+        # 2. Get Initial Key
+        initial_key_usage = self.get_key_usage(model_id, estimated_tokens, wait=wait, timeout=timeout)
+
+        final_kwargs = {**self.model_kwargs, **kwargs}
+        if 'id' not in final_kwargs:
             final_kwargs['id'] = model_id
-            model = self.model_class(api_key=key_usage.api_key, **final_kwargs)
-            
-            orig_metrics = model._get_metrics
-            def hook(*args, **kwargs):
-                m = orig_metrics(*args, **kwargs)
-                if m and hasattr(m, 'total_tokens'):
-                    self.manager.record_usage(key_usage.api_key, model_id, m.total_tokens)
-                return m
-            model._get_metrics = hook
-            self._model_cache[cache_key] = model
-        
-        return self._model_cache[cache_key], key_usage
+
+        model_instance = RotatingProviderClass(
+            api_key=initial_key_usage.api_key,
+            **final_kwargs
+        )
+
+        model_instance.wrapper = self
+        model_instance._rotating_wait = wait
+        model_instance._rotating_timeout = timeout
+        model_instance._estimated_tokens = estimated_tokens
+
+        orig_metrics = getattr(model_instance, "_get_metrics", None)
+        def metrics_hook(*args, **kwargs):
+            m = orig_metrics(*args, **kwargs)
+            if m and hasattr(m, 'total_tokens'):
+                current_key = model_instance.api_key
+                self.manager.record_usage(current_key, model_id, m.total_tokens)
+            return m
+        model_instance._get_metrics = metrics_hook
+
+        return model_instance
     
     # --- PRINTING HELPERS ---
     
