@@ -38,7 +38,7 @@ My attempt to port Claude Code so I can use my free API keys instead of Claude. 
 
 # Agno Code Extensions (Beyond Claude Code)
 
-### Personal Assistant Agent
+### Companion / Sidecar Agent
 - Separate agent that follows along with Agno Code's outputs / operations from the user's perspective
 - Answers conceptual questions / clarifications (ex. what does this code snippet do, what is this syntax exactly, etc.) without diluting workflow context
 - Potentially: Redefine user prompts, intermediary between user and Agno Code
@@ -78,6 +78,7 @@ My attempt to port Claude Code so I can use my free API keys instead of Claude. 
 - IN THE FUTURE: RL with smaller models for specific tasks to beat out frontier models using [Verifiers from PrimeIntellect](https://github.com/PrimeIntellect-ai/verifiers)
 
 ### Dynamic Knowledge 
+- Hybrid RAG: (Trigram similarity + Graph + Agentic + Keyword search, etc.)
 - Dynamic knowledge graph for projects / directories using Graphiti + FalkorDB (handled by an ingestion agent and a query agent)
 - [Script to check for hallucinations](https://github.com/coleam00/mcp-crawl4ai-rag/tree/main/knowledge_graphs) using the knowledge graph
 - Code Indexing for faster, better retrieval (investigate [KotaDB: Code Intelligence Engine](https://github.com/jayminwest/kotadb))
