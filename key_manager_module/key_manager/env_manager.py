@@ -249,7 +249,7 @@ class KeyUsage:
         if self.strategy == RateLimitStrategy.GLOBAL:
             self.global_bucket.add(tokens, ts)
         
-    def can_use_model(self, model_id: str, limits: RateLimits, estimated_tokens: int = 0) -> bool:
+    def can_use_model(self, model_id: str, limits: RateLimits, estimated_tokens: int = 1000) -> bool:
         """Check limits based on the provider's strategy"""
         if self.strategy == RateLimitStrategy.GLOBAL:
             return self.global_bucket.check_limits(limits, estimated_tokens)
@@ -328,7 +328,7 @@ class RotatingKeyManager:
         self._stop_event.set()
         self.logger.stop() # Flush logs
     
-    def get_key(self, model_id: str, limits: RateLimits, estimated_tokens: int = 0) -> Optional[KeyUsage]:
+    def get_key(self, model_id: str, limits: RateLimits, estimated_tokens: int = 1000) -> Optional[KeyUsage]:
         """Get an available API key that can handle the request"""
         with self.lock:
             for offset in range(len(self.keys)):
@@ -416,7 +416,7 @@ class RotatingCredentialsMixin:
     def _rotate_credentials(self):
         wait = getattr(self, '_rotating_wait', True)
         timeout = getattr(self, '_rotating_timeout', 10)
-        estimated_tokens = getattr(self, '_estimated_tokens', 0)
+        estimated_tokens = getattr(self, '_estimated_tokens', 1000)
         key_usage: KeyUsage = self.wrapper.get_key_usage(
             model_id=self.id, 
             estimated_tokens=estimated_tokens,
@@ -545,7 +545,7 @@ class MultiProviderWrapper:
         self.manager = RotatingKeyManager(api_keys, self.provider, self.strategy, db_path)
         self._model_cache = {}
 
-    def get_key_usage(self, model_id: str = None, estimated_tokens: int = 0, wait: bool = True, timeout: float = 10):
+    def get_key_usage(self, model_id: str = None, estimated_tokens: int = 1000, wait: bool = True, timeout: float = 10):
         """Finds a valid key"""
         mid = model_id or self.default_model_id
         strategy = self.PROVIDER_STRATEGIES.get(self.provider, RateLimitStrategy.PER_MODEL)
@@ -563,7 +563,7 @@ class MultiProviderWrapper:
                 raise RuntimeError(f"Timeout: No available API keys for {self.provider}/{mid} after {timeout}s")
             time.sleep(0.5)
 
-    def get_model(self, estimated_tokens: int = 0, wait: bool = True, timeout: float = 10, **kwargs):
+    def get_model(self, estimated_tokens: int = 1000, wait: bool = True, timeout: float = 10, **kwargs):
         """Dynamically creates a rotating model for ANY provider."""
         model_id = kwargs.get('id', self.default_model_id)  
         

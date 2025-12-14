@@ -1,4 +1,5 @@
 from agno.agent import Agent
+from agno.team import Team
 from agno.models.groq import Groq
 from agno.models.cerebras import Cerebras
 from architect_tools import LinearTools
@@ -10,7 +11,8 @@ import os
 
 ENV_FILE="../env/.env"
 DB_FILE="../env/api_usage.db"
-README_PATH="../README.md"
+README_PATH="../../README.md"
+
 LINEAR_API_KEY=os.getenv("LINEAR_API_KEY")
 
 def read_readme(path: str = README_PATH) -> str:
@@ -35,7 +37,7 @@ groq_wrapper = MultiProviderWrapper.from_env(
     model_class=Groq,
     default_model_id='moonshotai/kimi-k2-instruct-0905',
     env_file=ENV_FILE,
-    db_path=DB_FILE
+    db_path=DB_FILE,
 )
 
 cerebras_wrapper = MultiProviderWrapper.from_env(
@@ -47,82 +49,116 @@ cerebras_wrapper = MultiProviderWrapper.from_env(
 )
 
 s_sum_manager = SessionSummaryManager(
-    model=cerebras_wrapper.get_model(),
+    model=groq_wrapper.get_model(id="llama-3.3-70b-versatile", estimated_tokens=500),
     summary_request_message="Provide the summary of the conversation. Include all relevant details",
     
 )
 
 tool_compression_manager = CompressionManager(
-    model=cerebras_wrapper.get_model(),
+    model=groq_wrapper.get_model(id="llama-3.3-70b-versatile", estimated_tokens=2000),
     compress_tool_results_limit=4
 )
 
 desc="You sync a README to Linear, creating labels for categories."
+
+team_prompt=[
+    "You are the Team Lead for Linear synchronization.",
+    "You have direct access to the README via read_readme tool.",
+    "",
+    "--- YOUR WORKFLOW ---",
+    "1. Read the README to understand all tasks and features",
+    "2. Analyze each item and determine its State, Priority, and Labels",
+    "3. Delegate specific Linear operations to your Linear Architect member",
+    "4. Synthesize results and report to user",
+    "",
+    "--- SEMANTIC ANALYSIS (Your Responsibility) ---",
+    "For each task in the README, YOU decide:",
+    "",
+    "STATE:",
+    "  • [x] checkbox → Done",
+    "  • [/] checkbox or '(WIP)' → In Progress",
+    "  • Keywords 'Core', 'MVP', 'Must have', 'Initial', 'Basic' → Todo",
+    "  • Keywords 'Eventually', 'Later', 'Future', 'Maybe' → Backlog",
+    "  • Default (no special markers) → Backlog",
+    "",
+    "PRIORITY:",
+    "  • 'Critical', 'Blocker', 'Fix' → Urgent (1)",
+    "  • 'Core', 'MVP', 'Security', 'OAuth' → High (2)",
+    "  • Standard features → Medium (3)",
+    "  • 'Eventually', 'Later', 'Polish', 'Experiment' → Low (4)",
+    "",
+    "LABELS:",
+    "  • Extract from section headers (e.g., '## Deployment' → label: 'Deployment')",
+    "  • Use the deepest/most specific header above each task",
+    "  • For '### Shell Tools' under '## Features' → label: 'Shell Tools'",
+    "",
+    "--- DELEGATION STYLE ---",
+    "First ask: 'Get current teams and issues from Linear'",
+    "Then give SPECIFIC batched instructions:",
+    "  ✓ 'Create these issues: [{title: \"Web app\", state: \"Todo\", priority: 2, labels: [\"Deployment\"]}, ...]'",
+    "  ✓ 'Update issue X to state InProgress, priority High'",
+    "  ✗ 'Sync everything' (too vague)",
+    "",
+    "--- DIFF LOGIC ---",
+    "Compare README (desired) vs Linear (current):",
+    "  • TO_CREATE: In README, not in Linear (fuzzy match titles)",
+    "  • TO_UPDATE: In both, but state/priority differs from your analysis",
+    "  • TO_DELETE: In Linear, completely absent from README (be conservative)",
+    "",
+    "You are the strategic brain. Linear Architect is your hands."
+]
+
+agent_prompt=[
+    "You are the Linear Architect, a specialized Linear API executor.",
+    "You handle ALL interactions with Linear's GraphQL API.",
+    "",
+    "--- YOUR ROLE ---",
+    "Execute precise operations as instructed by Team Lead:",
+    "  • Fetch teams, states, and current issues",
+    "  • Create/update/delete issues in batches",
+    "  • Ensure labels exist before using them",
+    "  • Report results concisely",
+    "",
+    "--- MEMORY RULE ---",
+    "Call get_teams and get_issues ONCE when first requested.",
+    "YOU REMEMBER THE RESULTS for the rest of this conversation.",
+    "Do NOT re-call unless Team Lead explicitly says 'refresh' or 'get latest'.",
+    "",
+    "--- EXECUTION PATTERN ---",
+    "Team Lead will give you structured data like:",
+    "  'Create: [{title: \"X\", state_id: \"abc\", priority: 2}, ...]'",
+    "",
+    "You:",
+    "  1. Call ensure_labels for any new labels",
+    "  2. Call batch_create_issues with the exact data provided",
+    "  3. Report: 'Created 5 issues: Web app, OAuth, ...'",
+    "",
+    "--- RESPONSE STYLE ---",
+    "Be concise. Team Lead needs summaries, not raw JSON:",
+    "  ✓ 'Fetched 12 current issues across 3 states'",
+    "  ✓ 'Created 8 issues, updated 3, no deletions'",
+    "  ✗ [500 lines of JSON dump]",
+    "",
+    "You are a clean, efficient execution layer.",
+    "No strategic thinking. Just precise tool execution."
+]
 
 def get_linear_agent( debug_mode = True, debug_level = 2, **kwargs):
     return Agent(
     name="Linear Architect",
     id="linear_architect",
     # model=groq_wrapper.get_model(),
-    model=cerebras_wrapper.get_model(id="zai-glm-4.6"),
-    # model=cerebras_wrapper.get_model(id="gpt-oss-120b"),
-    tools=[linear_tools, read_readme],
+    # model=cerebras_wrapper.get_model(id="zai-glm-4.6"),
+    # model=cerebras_wrapper.get_model(id="qwen-3-235b-a22b-instruct-2507"),
+    model=cerebras_wrapper.get_model(id="gpt-oss-120b", estimated_tokens=3000),
+    tools=[linear_tools],
     tool_call_limit=50,
     description=desc,
-    introduction="Hi, I am a Linear Taskboard Agent",
-    
-    instructions=[
-        "You are the 'Linear Architect', a Product Manager agent responsible for syncing a README.md file (Source of Truth) with a Linear.app board (Execution State).",
-        
-        "--- PHASE 1: DISCOVERY ---",
-        "1. ENVIRONMENT:",
-        "   - Call `get_teams`. Map Team ID and State IDs (Backlog, Todo, In Progress, Done).",
-        "   - Call `get_issues`. Fetch the CURRENT_STATE (IDs, Titles, States).",
-        "   - Read `README.md`. This is the DESIRED_STATE.",
-        
-        "2. LABEL STRATEGY:",
-        "   - Your README uses Functional Headers (e.g., '## Deployment', '### Shell Tools').",
-        "   - Treat the **deepest** header as the Label.",
-        "   - Call `ensure_labels` for all identified headers.",
-        
-        "--- PHASE 2: SEMANTIC TRIAGE (CRITICAL) ---",
-        "You must determine the correct State and Priority for each task based on its text content.",
-        
-        "1. STATE LOGIC (Where does it go?):",
-        "   - **Done:** If the task starts with `[x]`.",
-        "   - **In Progress:** If the task starts with `[/]` or text says '(WIP)'.",
-        "   - **Backlog (Default):** Any standard task.",
-        "   - **Todo (Smart Promotion):** Promote a task from Backlog to Todo if:",
-        "     - It seems critical for an MVP (e.g., 'Web app', 'OAuth', 'Package management').",
-        "     - It contains keywords: 'Core', 'Must have', 'Initial', 'Basic'.",
-        "   - **Deprioritize:** Force to Backlog if text says: 'Eventually', 'Later', 'Future', 'Maybe'.",
-
-        "2. PRIORITY LOGIC (How urgent is it?):",
-        "   - **Urgent (1):** 'Critical', 'Blocker', 'Fix'.",
-        "   - **High (2):** 'Core', 'MVP', 'Security', 'OAuth'.",
-        "   - **Medium (3):** Standard features.",
-        "   - **Low (4):** 'Eventually', 'Later', 'UI polish', 'Experiments'.",
-        
-        "--- PHASE 3: DIFF & EXECUTION ---",
-        "Compare DESIRED vs CURRENT state. Use fuzzy matching for titles.",
-        
-        "1. PREPARE BATCHES:",
-        "   - **TO_CREATE:** New items. Apply the State/Priority/Label logic derived above.",
-        "   - **TO_UPDATE:** Existing items where State/Priority/Title differs from your new calculation.",
-        "   - **TO_DELETE:** Items in Linear that are completely absent from the README (Be conservative).",
-        
-        "2. EXECUTE:",
-        "   - Call `batch_create_issues` for new items.",
-        "   - Call `batch_update_issues` for changed items.",
-        "   - Call `batch_delete_issues` for removed items.",
-        
-        "--- FINAL REPORT ---",
-        "Report the sync summary. Explicitly mention how many items you promoted to 'Todo' vs 'Backlog'."
-    ],
-    
+      
+    # instructions=agent_prompt,
     markdown=True,
     
-    db=SqliteDb(db_file="./db_linear_agent.db", session_table="Linear Agent Sessions"),
+    db=SqliteDb(db_file="./db_linear.db", session_table="Linear Sessions"),
     retries=3,
     delay_between_retries=1,
 
@@ -147,6 +183,50 @@ def get_linear_agent( debug_mode = True, debug_level = 2, **kwargs):
 
     **kwargs
 )
+
+# TEAM
+def get_linear_team( debug_mode = True, debug_level = 2, **kwargs):
+    return Team(
+        name="Linear Team",
+        id="linear_team",
+        
+        model=groq_wrapper.get_model(estimated_tokens=3000),
+        # model=cerebras_wrapper.get_model(id="zai-glm-4.6"),
+        # model=cerebras_wrapper.get_model(id="qwen-3-235b-a22b-instruct-2507"),
+        # model=cerebras_wrapper.get_model(id="gpt-oss-120b"),
+        # model=cerebras_wrapper.get_model(id="zai-glm-4.6"),
+        
+        tools=[read_readme],
+        members=[get_linear_agent(debug_mode=debug_mode, debug_level=debug_level, **kwargs)],
+        description="Team for managing Linear boards and issues.",
+        instructions=team_prompt,
+        show_members_responses=True,
+        markdown=True,
+        
+        db=SqliteDb(db_file="./db_linear.db", session_table="Linear Sessions"),
+        retries=3,
+        delay_between_retries=1,
+
+        compress_tool_results=True,
+        compression_manager=tool_compression_manager,
+
+        add_history_to_context=True,
+        num_history_runs=3,
+        max_tool_calls_from_history=2,
+        # read_chat_history=True,
+
+        add_session_summary_to_context=True,    
+        session_summary_manager=s_sum_manager,
+
+        # search_session_history=True,
+        # num_history_sessions=5,
+        
+        debug_mode=debug_mode,
+        debug_level=debug_level,
+        
+        **kwargs
+    )
+
 
 if __name__ == "__main__":
     agent = get_linear_agent()

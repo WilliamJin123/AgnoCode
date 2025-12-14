@@ -62,27 +62,58 @@ class LinearTools(Toolkit):
         except Exception as e:
             return f"Error: {str(e)}"
 
-    def get_issues(self, team_id: str) -> str:
+    def get_issues(self, team_id: str, issue_ids: Optional[str] = None) -> str:
         """
         Fetches active issues with priority to calculate the 'Diff'.
-        """
-        query = """
-        query($teamId: String!) {
-          team(id: $teamId) {
-            issues(first: 100, filter: { state: { type: { neq: "completed" } } }) {
-              nodes { 
-                id 
-                title 
-                description 
-                priority 
-                state { id name } 
-              }
-            }
-          }
-        }
+        
+        Args:
+            team_id (str): The Team ID to fetch issues for.
+            issue_ids (Optional[str]): JSON STRING list of specific issue IDs to fetch.
+                                    Format: ["UUID1", "UUID2", ...]
+                                    If provided, only fetches these specific issues.
+                                    If None, fetches all active issues (non-completed).
         """
         try:
-            data = self._query(query, {"teamId": team_id})
+            # Parse issue IDs if provided
+            filter_ids = json.loads(issue_ids) if issue_ids else None
+            
+            if filter_ids:
+                # Query specific issues by ID
+                query = """
+                query($teamId: String!, $issueIds: [String!]!) {
+                team(id: $teamId) {
+                    issues(first: 100, filter: { id: { in: $issueIds } }) {
+                    nodes { 
+                        id 
+                        title 
+                        description 
+                        priority 
+                        state { id name } 
+                    }
+                    }
+                }
+                }
+                """
+                data = self._query(query, {"teamId": team_id, "issueIds": filter_ids})
+            else:
+                # Query all active issues
+                query = """
+                query($teamId: String!) {
+                team(id: $teamId) {
+                    issues(first: 100, filter: { state: { type: { neq: "completed" } } }) {
+                    nodes { 
+                        id 
+                        title 
+                        description 
+                        priority 
+                        state { id name } 
+                    }
+                    }
+                }
+                }
+                """
+                data = self._query(query, {"teamId": team_id})
+            
             issues = []
             for node in data['team']['issues']['nodes']:
                 issues.append({
@@ -95,15 +126,6 @@ class LinearTools(Toolkit):
             return json.dumps(issues, indent=2)
         except Exception as e:
             return f"Error: {str(e)}"
-
-    def ensure_label(self, team_id: str, label_name: str) -> str:
-        """Ensures a label exists and returns its ID."""
-        search_query = 'query($name: String!) { issueLabels(filter: { name: { eq: $name } }) { nodes { id } } }'
-        data = self._query(search_query, {"name": label_name})
-        if data['issueLabels']['nodes']: return data['issueLabels']['nodes'][0]['id']
-        
-        create_mutation = 'mutation($name: String!, $teamId: String!) { issueLabelCreate(input: { name: $name, teamId: $teamId }) { issueLabel { id } } }'
-        return self._query(create_mutation, {"name": label_name, "teamId": team_id})['issueLabelCreate']['issueLabel']['id']
 
     def ensure_labels(self, team_id: str, label_names: List[str]) -> str:
         """
@@ -240,7 +262,7 @@ class LinearTools(Toolkit):
         
         Args:
             updates (str): JSON STRING list of update objects.
-                           Format: [{"id": "UUID", "priority": 2, "state_id": "..."}]
+                        Format: [{"id": "UUID", "priority": 2, "state_id": "..."}]
         """
         try:
             update_list = json.loads(updates)
@@ -272,7 +294,7 @@ class LinearTools(Toolkit):
             return f"Batch Update Failed: {str(e)}"
 
     def batch_delete_issues(self, issue_ids: str) -> str:
-        """Deletes multiple issues."""
+        """Deletes multiple issues by issue IDs."""
         try:
             ids = json.loads(issue_ids)
             if not ids: return "No issues to delete."
