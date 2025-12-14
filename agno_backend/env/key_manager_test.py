@@ -5,8 +5,8 @@ from agno.models.cerebras import Cerebras
 from agno.models.groq import Groq
 from agno.models.google import Gemini
 
-ENV_FILE = "../env/.env"
-DB_FILE = "../env/api_usage.db"
+ENV_FILE = ".env"
+DB_FILE = "api_usage.db"
 
 async def main():
     print("--- STARTING SIMPLE KEY MANAGER TEST ---\n")
@@ -26,6 +26,7 @@ async def main():
             
             agent = Agent(model=model)
             agent.print_response("Say 'Confirmed'", stream=False)
+            agent.print_response("Say 'Confirmed (with Stream)'", stream=True)
         except Exception as e:
             print(f"Failed: {e}")
 
@@ -52,7 +53,7 @@ async def main():
         print(f"  Using Key ...{last_key[-8:]}")
         
         agent = Agent(model=model)
-        await agent.aprint_response("List 3 fruits.", stream=True)
+        await agent.aprint_response("List 3 fruits.", stream=False)
     except Exception as e:
         print(f"  Error: {e}")
 

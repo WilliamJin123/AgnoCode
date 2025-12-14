@@ -5,7 +5,7 @@ from agno.models.groq import Groq
 from agno.models.cerebras import Cerebras
 from agno.models.google.gemini import Gemini
 
-load_dotenv("../.env", override=True)
+load_dotenv(".env", override=True)
 
 def test_provider_keys(prefix, provider_class, model_id, prompt="Say Hello."):
     num = int(os.getenv(f"NUM_{prefix}", 0))
@@ -28,5 +28,5 @@ def test_provider_keys(prefix, provider_class, model_id, prompt="Say Hello."):
     input("Press Enter to continue...")
 
 # test_provider_keys("GROQ", Groq, "llama-3.3-70b-versatile")
-# test_provider_keys("CEREBRAS", Cerebras, "zai-glm-4.6")
-test_provider_keys("GEMINI", Gemini, "gemini-2.5-flash")
+test_provider_keys("CEREBRAS", Cerebras, "llama3.1-8b")
+# test_provider_keys("GEMINI", Gemini, "gemini-2.5-flash")

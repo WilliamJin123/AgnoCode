@@ -5,8 +5,8 @@ from agno.models.cerebras import Cerebras
 from agno.models.groq import Groq
 from agno.models.google import Gemini
 
-ENV_FILE = "../env/.env"
-DB_FILE = "../env/api_usage.db"
+ENV_FILE = ".env"
+DB_FILE = "api_usage.db"
 
 async def run_stress_test(provider_name, wrapper, model_id, limit_attribute_name):
     print(f"\n{'#'*60}")
