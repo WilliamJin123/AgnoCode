@@ -66,9 +66,10 @@ My attempt to port Claude Code so I can use my free API keys instead of Claude. 
 - Documentation Search: [Context7](https://github.com/upstash/context7) MCP for documentation (better yet, make it a custom agent skill) 
 - Browserbase / [Stagehand](https://github.com/browserbase/stagehand) Search 
 
-### Writing Code
+### Writing / Running Code
 - Expect the agent to give plans and justify every change
 - Optionality for full rewrites, diffs, suggestions
+- E2B AI-managed sandboxes for agent exploration
 
 ### Models
 - Support for any OpenAI API-adhering models
