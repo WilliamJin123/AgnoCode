@@ -299,6 +299,14 @@ class RotatingKeyManager:
         atexit.register(self.stop)
         print(f"[{provider_name}] Initialized with {len(self.keys)} keys.")
     
+    def force_rotate_index(self):
+        """
+        Force the internal pointer to increment. 
+        Useful when a key hits a 429 despite local checks passing.
+        """
+        with self.lock:
+            self.current_index = (self.current_index + 1) % len(self.keys)
+    
     def _hydrate(self):
         print(f"[{self.provider_name}] Loading history...")
         for key in self.keys:
@@ -413,6 +421,7 @@ class RotatingCredentialsMixin:
     A universal Mixin that forces a key rotation and client rebuild
     before every single model invocation.
     """
+    
     def _rotate_credentials(self):
         wait = getattr(self, '_rotating_wait', True)
         timeout = getattr(self, '_rotating_timeout', 10)
@@ -429,21 +438,78 @@ class RotatingCredentialsMixin:
         if hasattr(self, "async_client"): self.async_client = None
         if hasattr(self, "gemini_client"): self.gemini_client = None
 
+    def _is_rate_limit_error(self, e: Exception) -> bool:
+        """Heuristic to detect rate limits across different providers"""
+        err_str = str(e).lower()
+        # Common indicators of a rate limit
+        if "429" in err_str: return True
+        if "too many requests" in err_str: return True
+        if "rate limit" in err_str: return True
+        if "resource exhausted" in err_str: return True 
+        return False
+
+    def _get_retry_limit(self):
+        user_limit = min(getattr(self, '_max_retries', 5), len(self.wrapper.manager.keys) - 1)
+        return user_limit
+
     def invoke(self, *args, **kwargs):
-        self._rotate_credentials()
-        return super().invoke(*args, **kwargs)
+        limit = self._get_retry_limit()
+        
+        for attempt in range(limit + 1):
+            try:
+                self._rotate_credentials()
+                return super().invoke(*args, **kwargs)
+            except Exception as e:
+                if self._is_rate_limit_error(e) and attempt < limit:
+                    print(f" 429 Hit on key ...{self.api_key[-8:]} (Sync). Rotating and retrying ({attempt+1}/{limit})...")
+                    self.wrapper.manager.force_rotate_index()
+                    continue
+                raise e
 
     async def ainvoke(self, *args, **kwargs):
-        self._rotate_credentials()
-        return await super().ainvoke(*args, **kwargs)
+        limit = self._get_retry_limit()
+        
+        for attempt in range(limit + 1):
+            try:
+                self._rotate_credentials()
+                return await super().ainvoke(*args, **kwargs)
+            except Exception as e:
+                if self._is_rate_limit_error(e) and attempt < limit:
+                    print(f" 429 Hit on key ...{self.api_key[-8:]} (Async). Rotating and retrying ({attempt+1}/{limit})...")
+                    self.wrapper.manager.force_rotate_index()
+                    continue
+                raise e
     
     def invoke_stream(self, *args, **kwargs):
-        self._rotate_credentials()
-        yield from super().invoke_stream(*args, **kwargs)
+        limit = self._get_retry_limit()
+        
+        for attempt in range(limit + 1):
+            try:
+                self._rotate_credentials()
+                yield from super().invoke_stream(*args, **kwargs)
+                return
+            except Exception as e:
+                if self._is_rate_limit_error(e) and attempt < limit:
+                    print(f" 429 Hit on key ...{self.api_key[-8:]} (Sync Stream). Rotating and retrying ({attempt+1}/{limit})...")
+                    self.wrapper.manager.force_rotate_index()
+                    continue
+                raise e
 
     async def ainvoke_stream(self, *args, **kwargs):
-        self._rotate_credentials()
-        async for chunk in super().ainvoke_stream(*args, **kwargs): yield chunk
+        limit = self._get_retry_limit()
+        
+        for attempt in range(limit + 1):
+            try:
+                self._rotate_credentials()
+                async for chunk in super().ainvoke_stream(*args, **kwargs): 
+                    yield chunk
+                return
+            except Exception as e:
+                if self._is_rate_limit_error(e) and attempt < limit:
+                    print(f" 429 Hit on key ...{self.api_key[-8:]} (Async Stream). Rotating and retrying ({attempt+1}/{limit})...")
+                    self.wrapper.manager.force_rotate_index()
+                    continue
+                raise e
 
 class MultiProviderWrapper:
     """Wrapper for Agno models with rotating API keys"""
@@ -563,7 +629,7 @@ class MultiProviderWrapper:
                 raise RuntimeError(f"Timeout: No available API keys for {self.provider}/{mid} after {timeout}s")
             time.sleep(0.5)
 
-    def get_model(self, estimated_tokens: int = 1000, wait: bool = True, timeout: float = 10, **kwargs):
+    def get_model(self, estimated_tokens: int = 1000, wait: bool = True, timeout: float = 10, max_retries: int = 5, **kwargs):
         """Dynamically creates a rotating model for ANY provider."""
         model_id = kwargs.get('id', self.default_model_id)  
         
@@ -587,7 +653,8 @@ class MultiProviderWrapper:
         model_instance._rotating_wait = wait
         model_instance._rotating_timeout = timeout
         model_instance._estimated_tokens = estimated_tokens
-
+        model_instance._max_retries = max_retries
+        
         orig_metrics = getattr(model_instance, "_get_metrics", None)
         def metrics_hook(*args, **kwargs):
             if orig_metrics:

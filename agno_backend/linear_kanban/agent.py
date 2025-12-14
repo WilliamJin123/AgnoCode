@@ -150,7 +150,7 @@ def get_linear_agent( debug_mode = True, debug_level = 2, **kwargs):
     # model=groq_wrapper.get_model(),
     # model=cerebras_wrapper.get_model(id="zai-glm-4.6"),
     # model=cerebras_wrapper.get_model(id="qwen-3-235b-a22b-instruct-2507"),
-    model=cerebras_wrapper.get_model(id="gpt-oss-120b", estimated_tokens=3000),
+    model=cerebras_wrapper.get_model(id="gpt-oss-120b", estimated_tokens=3000,),
     tools=[linear_tools],
     tool_call_limit=50,
     description=desc,
