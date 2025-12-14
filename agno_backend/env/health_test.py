@@ -28,5 +28,5 @@ def test_provider_keys(prefix, provider_class, model_id, prompt="Say Hello."):
     input("Press Enter to continue...")
 
 # test_provider_keys("GROQ", Groq, "llama-3.3-70b-versatile")
-test_provider_keys("CEREBRAS", Cerebras, "llama3.1-8b")
-# test_provider_keys("GEMINI", Gemini, "gemini-2.5-flash")
+# test_provider_keys("CEREBRAS", Cerebras, "llama3.1-8b")
+test_provider_keys("GEMINI", Gemini, "gemini-2.5-flash")

@@ -1,16 +1,21 @@
 import atexit
 import threading
 import time
+import queue
 from typing import Dict, List, Optional, Any, Union
 from dataclasses import dataclass, field
-from threading import Lock, Event, Timer
+from threading import Lock, Event
 import sqlite3
 import os
 from pathlib import Path
 from dotenv import load_dotenv
 from collections import defaultdict, deque
+from enum import Enum
+class RateLimitStrategy(Enum):
+    PER_MODEL = "per_model"  # Cerebras, Groq, Gemini
+    GLOBAL = "global"        # OpenRouter (Shared limits across all models)
 
-# --- 1. CONFIGURATION DATA ---
+# --- CONFIGURATION DATA ---
 
 @dataclass
 class RateLimits:
@@ -43,16 +48,18 @@ class UsageSnapshot:
             self.total_requests + other.total_requests, self.total_tokens + other.total_tokens
         )
 
-# --- 2. DATABASE LAYER ---
+# --- DATABASE LAYER ---
 
 class UsageDatabase:
     """Handles SQLite persistence for API usage"""
     def __init__(self, db_path: str = "api_usage.db"):
         self.db_path = db_path
         self._init_db()
+        
     def _init_db(self):
         with sqlite3.connect(self.db_path, check_same_thread=False) as conn:
             # Create table for request logs
+            conn.execute("PRAGMA journal_mode=WAL;")
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS usage_logs (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -63,24 +70,9 @@ class UsageDatabase:
                     tokens INTEGER
                 )
             """)
-            # 1. Operational: Loading history for a specific key
-            conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_key_usage 
-                ON usage_logs(provider, api_key_suffix, timestamp)
-            """)
-
-            # 2. Maintenance: Pruning old records
-            conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_cleanup 
-                ON usage_logs(timestamp)
-            """)
-
-            # 3. Analytics: Reporting usage by model (ignoring key)
-            conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_model_reporting 
-                ON usage_logs(provider, model, timestamp)
-            """)
-            
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_key_usage ON usage_logs(provider, api_key_suffix, timestamp)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_cleanup ON usage_logs(timestamp)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_model_reporting ON usage_logs(provider, model, timestamp)")     
 
     def record_usage(self, provider: str, model: str, api_key: str, tokens: int):
         """Log a single request to the DB"""
@@ -91,11 +83,22 @@ class UsageDatabase:
                 (provider, model, suffix, time.time(), tokens)
             )
 
-    def load_history(self, provider: str, api_key: str, seconds_lookback: int) -> List[tuple[float, int]]:
+    def record_usage_batch(self, records: List[tuple]):
+        """Batch insert for performance"""
+        if not records: return
+        try:
+            with sqlite3.connect(self.db_path, check_same_thread=False) as conn:
+                conn.executemany(
+                    "INSERT INTO usage_logs (provider, model, api_key_suffix, timestamp, tokens) VALUES (?, ?, ?, ?, ?)",
+                    records
+                )
+        except Exception as e:
+            print(f"DB Write Error: {e}")
+
+    def load_history(self, provider: str, api_key: str, seconds_lookback: int) -> List[tuple[str, float, int]]:
         """Load history SPECIFIC to this Provider + Model combination"""
         suffix = api_key[-8:] if len(api_key) > 8 else api_key
-        cutoff = time.time() - seconds_lookback
-        
+        cutoff = time.time() - seconds_lookback    
         with sqlite3.connect(self.db_path, check_same_thread=False) as conn:
             cursor = conn.execute(
                 """
@@ -113,7 +116,55 @@ class UsageDatabase:
         with sqlite3.connect(self.db_path, check_same_thread=False) as conn:
             conn.execute("DELETE FROM usage_logs WHERE timestamp < ?", (cutoff,))
 
-# --- 3. USAGE TRACKING LOGIC ---
+# --- ASYNC LOGGER ---
+class AsyncUsageLogger:
+    """Decouples DB writes from the main thread"""
+    def __init__(self, db: UsageDatabase):
+        self.db = db
+        self.queue = queue.Queue()
+        self._stop_event = threading.Event()
+        self._thread = threading.Thread(target=self._writer_loop, daemon=True)
+        self._thread.start()
+        atexit.register(self.stop)
+
+    def log(self, provider: str, model: str, api_key: str, tokens: int):
+        self.queue.put((provider, model, api_key, time.time(), tokens))
+
+    def _writer_loop(self):
+        batch = []
+        while not self._stop_event.is_set():
+            try:
+                # Collect items for up to 1 second
+                record = self.queue.get(timeout=1.0)
+                # Parse record for batch formatting
+                provider, model, full_key, ts, tokens = record
+                suffix = full_key[-8:] if len(full_key) > 8 else full_key
+                batch.append((provider, model, suffix, ts, tokens))
+                
+                # Drain queue up to 50 items to batch write
+                while len(batch) < 50:
+                    try:
+                        r = self.queue.get_nowait()
+                        p, m, k, t, tok = r
+                        s = k[-8:] if len(k) > 8 else k
+                        batch.append((p, m, s, t, tok))
+                    except queue.Empty:
+                        break
+                
+                self.db.record_usage_batch(batch)
+                batch.clear()
+                
+            except queue.Empty:
+                continue
+            except Exception as e:
+                print(f"Logging thread error: {e}")
+
+    def stop(self):
+        self._stop_event.set()
+        if self._thread.is_alive():
+            self._thread.join(timeout=2)
+
+# --- USAGE TRACKING ---
 @dataclass
 class UsageBucket:
     """Tracks counters for a SINGLE model context"""
@@ -131,20 +182,17 @@ class UsageBucket:
     def clean(self):
         """Clean old entries based on current time"""
         now = time.time()
-        self._clean_deque(self.requests_minute, now - 60)
-        self._clean_deque(self.requests_hour, now - 3600)
-        self._clean_deque(self.requests_day, now - 86400)
+        cutoffs = (now - 60, now - 3600, now - 86400)
         
-        self._clean_deque(self.tokens_minute, now - 60)
-        self._clean_deque(self.tokens_hour, now - 3600)
-        self._clean_deque(self.tokens_day, now - 86400)
-    
-    def _clean_deque(self, d: deque, cutoff: float):
-        while d:
-            ts = d[0] if isinstance(d[0], float) else d[0][0]
-            if ts > cutoff:
-                break
-            d.popleft()
+        for d, cut in zip(
+            [self.requests_minute, self.requests_hour, self.requests_day], cutoffs
+        ):
+            while d and d[0] <= cut: d.popleft()
+            
+        for d, cut in zip(
+            [self.tokens_minute, self.tokens_hour, self.tokens_day], cutoffs
+        ):
+            while d and d[0][0] <= cut: d.popleft()
     
     def add(self, tokens: int, timestamp: float):
         self.requests_minute.append(timestamp)
@@ -157,6 +205,20 @@ class UsageBucket:
             self.tokens_hour.append((timestamp, tokens))
             self.tokens_day.append((timestamp, tokens))
             self.total_tokens += tokens
+    
+    def check_limits(self, limits: RateLimits, estimated_tokens: int) -> bool:
+        self.clean()
+        if len(self.requests_minute) >= limits.requests_per_minute: return False
+        if len(self.requests_hour) >= limits.requests_per_hour: return False
+        if len(self.requests_day) >= limits.requests_per_day: return False
+        
+        # Note: Summing deques is O(N). For extremely high throughput (1000s RPM),
+        # maintain a running sum. For LLM usage (usually <100 RPM), this is fine.
+        if limits.tokens_per_minute and (sum(t[1] for t in self.tokens_minute) + estimated_tokens > limits.tokens_per_minute): return False
+        if limits.tokens_per_hour and (sum(t[1] for t in self.tokens_hour) + estimated_tokens > limits.tokens_per_hour): return False
+        if limits.tokens_per_day and (sum(t[1] for t in self.tokens_day) + estimated_tokens > limits.tokens_per_day): return False
+        
+        return True
     
     def get_snapshot(self) -> UsageSnapshot:
         """Return current counts as a clean snapshot"""
@@ -172,81 +234,64 @@ class UsageBucket:
             total_tokens=self.total_tokens
         )
     
-    def check_limits(self, limits: RateLimits, estimated_tokens: int) -> bool:
-        self.clean()
-        
-        if len(self.requests_minute) >= limits.requests_per_minute: return False
-        if len(self.requests_hour) >= limits.requests_per_hour: return False
-        if len(self.requests_day) >= limits.requests_per_day: return False
-        
-        current_tpm = sum(t[1] for t in self.tokens_minute)
-        if limits.tokens_per_minute and current_tpm + estimated_tokens > limits.tokens_per_minute: return False
-        
-        current_tph = sum(t[1] for t in self.tokens_hour)
-        if limits.tokens_per_hour and current_tph + estimated_tokens > limits.tokens_per_hour: return False
-        
-        current_tpd = sum(t[1] for t in self.tokens_day)
-        if limits.tokens_per_day and current_tpd + estimated_tokens > limits.tokens_per_day: return False
-        
-        return True
 
 @dataclass
 class KeyUsage:
     """Represents an API Key and holds multiple UsageBuckets (one per model)"""
     api_key: str
+    strategy: RateLimitStrategy
     buckets: Dict[str, UsageBucket] = field(default_factory=lambda: defaultdict(UsageBucket))
+    global_bucket: UsageBucket = field(default_factory=UsageBucket)
     
     def record_usage(self, model_id: str, tokens: int, timestamp: float = None):
         ts = timestamp if timestamp else time.time()
         self.buckets[model_id].add(tokens, ts)
-    
+        if self.strategy == RateLimitStrategy.GLOBAL:
+            self.global_bucket.add(tokens, ts)
+        
     def can_use_model(self, model_id: str, limits: RateLimits, estimated_tokens: int = 0) -> bool:
-        return self.buckets[model_id].check_limits(limits, estimated_tokens)
+        """Check limits based on the provider's strategy"""
+        if self.strategy == RateLimitStrategy.GLOBAL:
+            return self.global_bucket.check_limits(limits, estimated_tokens)
+        else: # Per-Model Limits
+            return self.buckets[model_id].check_limits(limits, estimated_tokens)
 
     def get_total_snapshot(self) -> UsageSnapshot:
-        """Aggregates ALL buckets for this key"""
+        if self.strategy == RateLimitStrategy.GLOBAL:
+            return self.global_bucket.get_snapshot()
         total = UsageSnapshot()
-        for bucket in self.buckets.values():
-            total = total + bucket.get_snapshot()
+        for b in self.buckets.values():
+            total = total + b.get_snapshot()
         return total
 
 # --- 4. STATS DATA TRANSFER OBJECTS (DTOs) ---
 
 @dataclass
 class KeySummary:
-    index: int
-    suffix: str
-    snapshot: UsageSnapshot
-
+    index: int; suffix: str; snapshot: UsageSnapshot
 @dataclass
 class GlobalStats:
-    total: UsageSnapshot
-    keys: List[KeySummary]
-
+    total: UsageSnapshot; keys: List[KeySummary]
 @dataclass
 class KeyDetailedStats:
-    index: int
-    suffix: str
-    total: UsageSnapshot
-    breakdown: Dict[str, UsageSnapshot]
-
+    index: int; suffix: str; total: UsageSnapshot; breakdown: Dict[str, UsageSnapshot]
 @dataclass
 class ModelAggregatedStats:
-    model_id: str
-    total: UsageSnapshot
-    keys: List[KeySummary]
-
+    model_id: str; total: UsageSnapshot; keys: List[KeySummary]
+    
 class RotatingKeyManager:
     """Manages API key rotation with rate limiting"""
-    CLEANUP_INTERVAL = 60
+    CLEANUP_INTERVAL = 55  # seconds
     
-    def __init__(self, api_keys: List[str], provider_name: str, db_path: str = "api_usage.db"):
+    def __init__(self, api_keys: List[str], provider_name: str, strategy: RateLimitStrategy, db_path: str = "api_usage.db"):
         self.provider_name = provider_name
-        self.keys = [KeyUsage(api_key=k) for k in api_keys]
+        self.strategy = strategy
+        self.keys = [KeyUsage(api_key=k, strategy=strategy) for k in api_keys]
         self.current_index = 0
         self.lock = Lock()
         
         self.db = UsageDatabase(db_path)
+        self.logger = AsyncUsageLogger(self.db)
         self._hydrate()
 
         self._stop_event = Event()
@@ -271,6 +316,8 @@ class RotatingKeyManager:
                 # try:
                 #     self.db.prune_old_records()
                 # except: pass
+                if self.strategy == RateLimitStrategy.GLOBAL:
+                    key.global_bucket.clean()
             time.sleep(self.CLEANUP_INTERVAL)
     
     def _start_cleanup(self):
@@ -279,6 +326,7 @@ class RotatingKeyManager:
     
     def stop(self):
         self._stop_event.set()
+        self.logger.stop() # Flush logs
     
     def get_key(self, model_id: str, limits: RateLimits, estimated_tokens: int = 0) -> Optional[KeyUsage]:
         """Get an available API key that can handle the request"""
@@ -294,13 +342,13 @@ class RotatingKeyManager:
     
     def record_usage(self, api_key: Union[str, KeyUsage], model_id: str, tokens_used: int = 0):
         """Record usage for a specific API key"""
+        key_identifier = api_key if isinstance(api_key, str) else api_key.api_key
         with self.lock:
-            key_identifier = api_key if isinstance(api_key, str) else api_key.api_key
             for key in self.keys:
                 if key.api_key == key_identifier:
                     key.record_usage(model_id, tokens_used) #timestamp automatically generated as now()
-                    self.db.record_usage(self.provider_name, model_id, key.api_key, tokens_used)
                     break  
+        self.logger.log(self.provider_name, model_id, key_identifier, tokens_used)
                 
     # --- STATS HELPERS ---
     
@@ -311,8 +359,7 @@ class RotatingKeyManager:
                 return self.keys[identifier], identifier
         elif isinstance(identifier, str):
             for i, k in enumerate(self.keys):
-                if k.api_key == identifier or k.api_key.endswith(identifier):
-                    return k, i
+                if k.api_key == identifier or k.api_key.endswith(identifier): return k, i
         return None, -1
     
     def get_global_stats(self) -> GlobalStats:
@@ -325,7 +372,6 @@ class RotatingKeyManager:
                 total = total + snap
                 suffix = key.api_key[-8:] if len(key.api_key)>8 else key.api_key
                 keys_summary.append(KeySummary(index=i, suffix=suffix, snapshot=snap))
-        
         return GlobalStats(total=total, keys=keys_summary)
     
     def get_key_stats(self, identifier: Union[int, str]) -> Dict[str, Any]:
@@ -333,13 +379,11 @@ class RotatingKeyManager:
         with self.lock:
             key, idx = self._find_key(identifier)
             if not key: return None
-            
             total_snap = key.get_total_snapshot()
             breakdown = {}
             for model, bucket in key.buckets.items():
                 breakdown[model] = bucket.get_snapshot()
             suffix = key.api_key[-8:] if len(key.api_key)>8 else key.api_key
-            
             return KeyDetailedStats(index=idx, suffix=suffix, total=total_snap, breakdown=breakdown)
     
     def get_model_stats(self, model_id: str) -> UsageSnapshot:
@@ -353,7 +397,6 @@ class RotatingKeyManager:
                     total = total + snap
                     suffix = key.api_key[-8:] if len(key.api_key) > 8 else key.api_key
                     contributing_keys.append(KeySummary(index=i, suffix=suffix, snapshot=snap))
-        
         return ModelAggregatedStats(model_id=model_id, total=total, keys=contributing_keys)
     
     def get_granular_stats(self, identifier: Union[int, str], model_id: str) -> Optional[UsageSnapshot]:
@@ -361,15 +404,10 @@ class RotatingKeyManager:
         with self.lock:
             key, idx = self._find_key(identifier)
             if not key: return None
-            
             suffix = key.api_key[-8:] if len(key.api_key) > 8 else key.api_key
-            snap = UsageSnapshot() # Default empty
-            
-            if model_id in key.buckets:
-                snap = key.buckets[model_id].get_snapshot()
-            
+            snap = key.buckets[model_id].get_snapshot() if model_id in key.buckets else UsageSnapshot()
             return KeySummary(index=idx, suffix=suffix, snapshot=snap)
-
+        
 class RotatingCredentialsMixin:
     """
     A universal Mixin that forces a key rotation and client rebuild
@@ -379,21 +417,17 @@ class RotatingCredentialsMixin:
         wait = getattr(self, '_rotating_wait', True)
         timeout = getattr(self, '_rotating_timeout', 10)
         estimated_tokens = getattr(self, '_estimated_tokens', 0)
-
         key_usage: KeyUsage = self.wrapper.get_key_usage(
             model_id=self.id, 
             estimated_tokens=estimated_tokens,
             wait=wait,
             timeout=timeout
         )
-
         self.api_key = key_usage.api_key
-        if hasattr(self, "client"):
-            self.client = None
-        if hasattr(self, "async_client"):
-            self.async_client = None
-        if hasattr(self, "gemini_client"):
-            self.gemini_client = None
+        
+        if hasattr(self, "client"): self.client = None
+        if hasattr(self, "async_client"): self.async_client = None
+        if hasattr(self, "gemini_client"): self.gemini_client = None
 
     def invoke(self, *args, **kwargs):
         self._rotate_credentials()
@@ -409,11 +443,16 @@ class RotatingCredentialsMixin:
 
     async def ainvoke_stream(self, *args, **kwargs):
         self._rotate_credentials()
-        async for chunk in super().ainvoke_stream(*args, **kwargs):
-            yield chunk
+        async for chunk in super().ainvoke_stream(*args, **kwargs): yield chunk
 
 class MultiProviderWrapper:
     """Wrapper for Agno models with rotating API keys"""
+    PROVIDER_STRATEGIES = {
+        'cerebras': RateLimitStrategy.PER_MODEL,
+        'groq': RateLimitStrategy.PER_MODEL,
+        'gemini': RateLimitStrategy.PER_MODEL,
+        'openrouter': RateLimitStrategy.GLOBAL,
+    }
     
     MODEL_LIMITS = {
         'cerebras': {
@@ -457,6 +496,10 @@ class MultiProviderWrapper:
             'gemma-3-2b': RateLimits(30, 1800, 14400, 15000, 900000),
             'gemma-3-4b': RateLimits(30, 1800, 14400, 15000, 900000),
         },
+        'openrouter': {
+            'default': RateLimits(20, 50, 50),
+        },
+    
     }
     
     @staticmethod
@@ -498,18 +541,16 @@ class MultiProviderWrapper:
         self.model_class = model_class
         self.default_model_id = default_model_id
         self.model_kwargs = kwargs
-        self.manager = RotatingKeyManager(api_keys, self.provider, db_path)
+        self.strategy = self.PROVIDER_STRATEGIES.get(self.provider, RateLimitStrategy.PER_MODEL)
+        self.manager = RotatingKeyManager(api_keys, self.provider, self.strategy, db_path)
         self._model_cache = {}
 
     def get_key_usage(self, model_id: str = None, estimated_tokens: int = 0, wait: bool = True, timeout: float = 10):
         """Finds a valid key"""
         mid = model_id or self.default_model_id
-
+        strategy = self.PROVIDER_STRATEGIES.get(self.provider, RateLimitStrategy.PER_MODEL)
         provider_limits = self.MODEL_LIMITS.get(self.provider, {})
-        limits = provider_limits.get(mid)
-        if not limits:
-            print(f"Warning: No limits for {mid}, using default.")
-            limits = RateLimits(10, 100, 1000)
+        limits = provider_limits.get(mid, provider_limits.get('default', RateLimits(10, 100, 1000)))
 
         start = time.time()
         while True:
@@ -533,7 +574,6 @@ class MultiProviderWrapper:
         )
         # 2. Get Initial Key
         initial_key_usage = self.get_key_usage(model_id, estimated_tokens, wait=wait, timeout=timeout)
-
         final_kwargs = {**self.model_kwargs, **kwargs}
         if 'id' not in final_kwargs:
             final_kwargs['id'] = model_id
@@ -550,11 +590,13 @@ class MultiProviderWrapper:
 
         orig_metrics = getattr(model_instance, "_get_metrics", None)
         def metrics_hook(*args, **kwargs):
-            m = orig_metrics(*args, **kwargs)
-            if m and hasattr(m, 'total_tokens'):
-                current_key = model_instance.api_key
-                self.manager.record_usage(current_key, model_id, m.total_tokens)
-            return m
+            if orig_metrics:
+                m = orig_metrics(*args, **kwargs)
+                if m and hasattr(m, 'total_tokens'):
+                    current_key = model_instance.api_key
+                    self.manager.record_usage(current_key, model_id, m.total_tokens)
+                return m
+            return None
         model_instance._get_metrics = metrics_hook
 
         return model_instance
