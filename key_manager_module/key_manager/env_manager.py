@@ -11,6 +11,21 @@ from pathlib import Path
 from dotenv import load_dotenv
 from collections import defaultdict, deque
 from enum import Enum
+
+from rich.console import Console
+from rich.table import Table
+from rich.panel import Panel
+from rich import box
+from rich.markup import escape
+
+import logging
+try:
+    from .log_config import configure_logging
+except ImportError:
+    from log_config import configure_logging
+configure_logging()
+logger = logging.getLogger(__name__)
+
 class RateLimitStrategy(Enum):
     PER_MODEL = "per_model"  # Cerebras, Groq, Gemini
     GLOBAL = "global"        # OpenRouter (Shared limits across all models)
@@ -57,7 +72,7 @@ class UsageDatabase:
         self._init_db()
         
     def _init_db(self):
-        with sqlite3.connect(self.db_path, check_same_thread=False) as conn:
+        with sqlite3.connect(self.db_path, check_same_thread=False, isolation_level=None) as conn:
             # Create table for request logs
             conn.execute("PRAGMA journal_mode=WAL;")
             conn.execute("""
@@ -74,32 +89,11 @@ class UsageDatabase:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_cleanup ON usage_logs(timestamp)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_model_reporting ON usage_logs(provider, model, timestamp)")     
 
-    def record_usage(self, provider: str, model: str, api_key: str, tokens: int):
-        """Log a single request to the DB"""
-        suffix = api_key[-8:] if len(api_key) > 8 else api_key
-        with sqlite3.connect(self.db_path, check_same_thread=False) as conn:
-            conn.execute(
-                "INSERT INTO usage_logs (provider, model, api_key_suffix, timestamp, tokens) VALUES (?, ?, ?, ?, ?)",
-                (provider, model, suffix, time.time(), tokens)
-            )
-
-    def record_usage_batch(self, records: List[tuple]):
-        """Batch insert for performance"""
-        if not records: return
-        try:
-            with sqlite3.connect(self.db_path, check_same_thread=False) as conn:
-                conn.executemany(
-                    "INSERT INTO usage_logs (provider, model, api_key_suffix, timestamp, tokens) VALUES (?, ?, ?, ?, ?)",
-                    records
-                )
-        except Exception as e:
-            print(f"DB Write Error: {e}")
-
     def load_history(self, provider: str, api_key: str, seconds_lookback: int) -> List[tuple[str, float, int]]:
         """Load history SPECIFIC to this Provider + Model combination"""
         suffix = api_key[-8:] if len(api_key) > 8 else api_key
         cutoff = time.time() - seconds_lookback    
-        with sqlite3.connect(self.db_path, check_same_thread=False) as conn:
+        with sqlite3.connect(self.db_path, check_same_thread=False, isolation_level=None) as conn:
             cursor = conn.execute(
                 """
                 SELECT model, timestamp, tokens FROM usage_logs 
@@ -113,7 +107,7 @@ class UsageDatabase:
     def prune_old_records(self, days_retention: int = 3):
         """Delete records older than retention period to keep DB small (3 days)"""
         cutoff = time.time() - (days_retention * 86400)
-        with sqlite3.connect(self.db_path, check_same_thread=False) as conn:
+        with sqlite3.connect(self.db_path, check_same_thread=False, isolation_level=None) as conn:
             conn.execute("DELETE FROM usage_logs WHERE timestamp < ?", (cutoff,))
 
 # --- ASYNC LOGGER ---
@@ -132,6 +126,8 @@ class AsyncUsageLogger:
 
     def _writer_loop(self):
         batch = []
+        conn = sqlite3.connect(self.db.db_path, check_same_thread=False)
+        conn.execute("PRAGMA journal_mode=WAL;")
         while not self._stop_event.is_set():
             try:
                 # Collect items for up to 1 second
@@ -151,14 +147,30 @@ class AsyncUsageLogger:
                     except queue.Empty:
                         break
                 
-                self.db.record_usage_batch(batch)
-                batch.clear()
+                if batch:
+                    conn.executemany(
+                        "INSERT INTO usage_logs (provider, model, api_key_suffix, timestamp, tokens) VALUES (?, ?, ?, ?, ?)",
+                        batch
+                    )
+                    conn.commit()
+                    batch.clear()
                 
             except queue.Empty:
                 continue
             except Exception as e:
-                print(f"Logging thread error: {e}")
-
+                # print(f"Logging thread error: {e}")
+                logger.exception("Logging thread error", exc_info=e)
+        
+        if batch:
+            try:
+                conn.executemany(
+                     "INSERT INTO usage_logs (provider, model, api_key_suffix, timestamp, tokens) VALUES (?, ?, ?, ?, ?)",
+                     batch
+                )
+                conn.commit()
+            except: pass
+        conn.close() # Close connection only when thread dies
+        
     def stop(self):
         self._stop_event.set()
         if self._thread.is_alive():
@@ -178,6 +190,8 @@ class UsageBucket:
     
     total_requests: int = 0
     total_tokens: int = 0
+    
+    pending_tokens: int = 0
     
     def clean(self):
         """Clean old entries based on current time"""
@@ -212,13 +226,25 @@ class UsageBucket:
         if len(self.requests_hour) >= limits.requests_per_hour: return False
         if len(self.requests_day) >= limits.requests_per_day: return False
         
-        # Note: Summing deques is O(N). For extremely high throughput (1000s RPM),
-        # maintain a running sum. For LLM usage (usually <100 RPM), this is fine.
-        if limits.tokens_per_minute and (sum(t[1] for t in self.tokens_minute) + estimated_tokens > limits.tokens_per_minute): return False
-        if limits.tokens_per_hour and (sum(t[1] for t in self.tokens_hour) + estimated_tokens > limits.tokens_per_hour): return False
-        if limits.tokens_per_day and (sum(t[1] for t in self.tokens_day) + estimated_tokens > limits.tokens_per_day): return False
+        current_tpm = sum(t[1] for t in self.tokens_minute) + self.pending_tokens
+        current_tph = sum(t[1] for t in self.tokens_hour) + self.pending_tokens
+        current_tpd = sum(t[1] for t in self.tokens_day) + self.pending_tokens
+        
+        if limits.tokens_per_minute and (current_tpm + estimated_tokens > limits.tokens_per_minute): return False
+        if limits.tokens_per_hour and (current_tph + estimated_tokens > limits.tokens_per_hour): return False
+        if limits.tokens_per_day and (current_tpd + estimated_tokens > limits.tokens_per_day): return False
         
         return True
+    
+    def reserve(self, tokens: int):
+        """Lock in estimated tokens"""
+        self.pending_tokens += tokens
+    
+    def commit(self, actual_tokens: int, reserved_tokens: int, timestamp: float):
+        """Remove reservation and add actual usage"""
+        self.pending_tokens -= reserved_tokens
+        if self.pending_tokens < 0: self.pending_tokens = 0 # Safety floor
+        self.add(actual_tokens, timestamp)
     
     def get_snapshot(self) -> UsageSnapshot:
         """Return current counts as a clean snapshot"""
@@ -263,6 +289,17 @@ class KeyUsage:
         for b in self.buckets.values():
             total = total + b.get_snapshot()
         return total
+    
+    def reserve(self, model_id: str, tokens: int):
+        self.buckets[model_id].reserve(tokens)
+        if self.strategy == RateLimitStrategy.GLOBAL:
+            self.global_bucket.reserve(tokens)
+    
+    def commit(self, model_id: str, actual_tokens: int, reserved_tokens: int, timestamp: float = None):
+        ts = timestamp if timestamp else time.time()
+        self.buckets[model_id].commit(actual_tokens, reserved_tokens, ts)
+        if self.strategy == RateLimitStrategy.GLOBAL:
+            self.global_bucket.commit(actual_tokens, reserved_tokens, ts)
 
 # --- 4. STATS DATA TRANSFER OBJECTS (DTOs) ---
 
@@ -297,7 +334,8 @@ class RotatingKeyManager:
         self._stop_event = Event()
         self._start_cleanup()
         atexit.register(self.stop)
-        print(f"[{provider_name}] Initialized with {len(self.keys)} keys.")
+        # print(f"[{provider_name}] Initialized with {len(self.keys)} keys.")
+        logger.info("Initialized %d keys for provider %s.", len(self.keys), provider_name)
     
     def force_rotate_index(self):
         """
@@ -308,9 +346,11 @@ class RotatingKeyManager:
             self.current_index = (self.current_index + 1) % len(self.keys)
     
     def _hydrate(self):
-        print(f"[{self.provider_name}] Loading history...")
+        # print(f"[{self.provider_name}] Loading history...")
+        logger.debug("Loading history for provider %s.", self.provider_name)
         for key in self.keys:
             history = self.db.load_history(self.provider_name, key.api_key, 86400) # 24 hours
+            logger.debug("Loading %d records for key %s.", len(history), key.api_key[-8:])
             for model_id, timestamp, tokens in history:
                 key.record_usage(model_id, tokens=tokens, timestamp=timestamp)
     
@@ -321,11 +361,11 @@ class RotatingKeyManager:
                 for key in self.keys:
                     for bucket in key.buckets.values():
                         bucket.clean()
+                    if self.strategy == RateLimitStrategy.GLOBAL:
+                        key.global_bucket.clean()
                 # try:
                 #     self.db.prune_old_records()
                 # except: pass
-                if self.strategy == RateLimitStrategy.GLOBAL:
-                    key.global_bucket.clean()
             time.sleep(self.CLEANUP_INTERVAL)
     
     def _start_cleanup(self):
@@ -335,6 +375,8 @@ class RotatingKeyManager:
     def stop(self):
         self._stop_event.set()
         self.logger.stop() # Flush logs
+        if self._thread.is_alive():
+            self._thread.join(timeout=2)
     
     def get_key(self, model_id: str, limits: RateLimits, estimated_tokens: int = 1000) -> Optional[KeyUsage]:
         """Get an available API key that can handle the request"""
@@ -344,19 +386,20 @@ class RotatingKeyManager:
                 key : KeyUsage = self.keys[idx]
                 
                 if key.can_use_model(model_id, limits, estimated_tokens):
+                    key.reserve(model_id, estimated_tokens)
                     self.current_index = idx
                     return key
             return None
     
-    def record_usage(self, api_key: Union[str, KeyUsage], model_id: str, tokens_used: int = 0):
+    def record_usage(self, api_key: Union[str, KeyUsage], model_id: str,actual_tokens: int, estimated_tokens: int = 1000):
         """Record usage for a specific API key"""
         key_identifier = api_key if isinstance(api_key, str) else api_key.api_key
         with self.lock:
             for key in self.keys:
                 if key.api_key == key_identifier:
-                    key.record_usage(model_id, tokens_used) #timestamp automatically generated as now()
+                    key.commit(model_id, actual_tokens, estimated_tokens)
                     break  
-        self.logger.log(self.provider_name, model_id, key_identifier, tokens_used)
+        self.logger.log(self.provider_name, model_id, key_identifier, actual_tokens)
                 
     # --- STATS HELPERS ---
     
@@ -423,14 +466,11 @@ class RotatingCredentialsMixin:
     """
     
     def _rotate_credentials(self):
-        wait = getattr(self, '_rotating_wait', True)
-        timeout = getattr(self, '_rotating_timeout', 10)
-        estimated_tokens = getattr(self, '_estimated_tokens', 1000)
         key_usage: KeyUsage = self.wrapper.get_key_usage(
-            model_id=self.id, 
-            estimated_tokens=estimated_tokens,
-            wait=wait,
-            timeout=timeout
+            model_id=self.id,
+            estimated_tokens=self._estimated_tokens,
+            wait=self._rotating_wait,
+            timeout=self._rotating_timeout
         )
         self.api_key = key_usage.api_key
         
@@ -461,7 +501,8 @@ class RotatingCredentialsMixin:
                 return super().invoke(*args, **kwargs)
             except Exception as e:
                 if self._is_rate_limit_error(e) and attempt < limit:
-                    print(f" 429 Hit on key ...{self.api_key[-8:]} (Sync). Rotating and retrying ({attempt+1}/{limit})...")
+                    # print(f" 429 Hit on key ...{self.api_key[-8:]} (Sync). Rotating and retrying ({attempt+1}/{limit})...")
+                    logger.warning("429 Hit on key %s (Sync). Rotating and retrying (%d/%d).", self.api_key[-8:], attempt + 1, limit)
                     self.wrapper.manager.force_rotate_index()
                     continue
                 raise e
@@ -475,7 +516,8 @@ class RotatingCredentialsMixin:
                 return await super().ainvoke(*args, **kwargs)
             except Exception as e:
                 if self._is_rate_limit_error(e) and attempt < limit:
-                    print(f" 429 Hit on key ...{self.api_key[-8:]} (Async). Rotating and retrying ({attempt+1}/{limit})...")
+                    # print(f" 429 Hit on key ...{self.api_key[-8:]} (Async). Rotating and retrying ({attempt+1}/{limit})...")
+                    logger.warning("429 Hit on key %s (Async). Rotating and retrying (%d/%d).", self.api_key[-8:], attempt + 1, limit)
                     self.wrapper.manager.force_rotate_index()
                     continue
                 raise e
@@ -490,7 +532,8 @@ class RotatingCredentialsMixin:
                 return
             except Exception as e:
                 if self._is_rate_limit_error(e) and attempt < limit:
-                    print(f" 429 Hit on key ...{self.api_key[-8:]} (Sync Stream). Rotating and retrying ({attempt+1}/{limit})...")
+                    # print(f" 429 Hit on key ...{self.api_key[-8:]} (Sync Stream). Rotating and retrying ({attempt+1}/{limit})...")
+                    logger.warning("429 Hit on key %s (Sync Stream). Rotating and retrying (%d/%d).", self.api_key[-8:], attempt + 1, limit)
                     self.wrapper.manager.force_rotate_index()
                     continue
                 raise e
@@ -506,7 +549,8 @@ class RotatingCredentialsMixin:
                 return
             except Exception as e:
                 if self._is_rate_limit_error(e) and attempt < limit:
-                    print(f" 429 Hit on key ...{self.api_key[-8:]} (Async Stream). Rotating and retrying ({attempt+1}/{limit})...")
+                    # print(f" 429 Hit on key ...{self.api_key[-8:]} (Async Stream). Rotating and retrying ({attempt+1}/{limit})...")
+                    logger.warning("429 Hit on key %s (Async Stream). Rotating and retrying (%d/%d).", self.api_key[-8:], attempt + 1, limit)
                     self.wrapper.manager.force_rotate_index()
                     continue
                 raise e
@@ -568,13 +612,16 @@ class MultiProviderWrapper:
     
     }
     
+    _RotatingClass = None
+    
     @staticmethod
     def load_api_keys(provider: str, env_file: Optional[str] = None) -> List[str]:
         """Load API keys from environment variables"""
         if env_file:
             env_path = Path(env_file).resolve()
             if not env_path.exists():
-                print(f"Warning: The provided env_file '{env_path}' does not exist.")
+                # print(f"Warning: The provided env_file '{env_path}' does not exist.")
+                logger.warning("The provided env_file '%s' does not exist.", env_path)
         else:
             env_path = Path.cwd() / ".env"
         load_dotenv(dotenv_path=env_path, override=True)
@@ -597,19 +644,34 @@ class MultiProviderWrapper:
     
     @classmethod
     def from_env(cls, provider: str, model_class: Any, default_model_id: str, 
-                 env_file: Optional[str] = None, db_path: str = "api_usage.db", **kwargs):
+                 env_file: Optional[str] = None, db_path: str = "api_usage.db", debug: bool = False, **kwargs):
         api_keys = cls.load_api_keys(provider, env_file)
-        return cls(provider, model_class, default_model_id, api_keys, db_path, **kwargs)
+        return cls(provider, model_class, default_model_id, api_keys, db_path, debug, **kwargs)
     
     def __init__(self, provider: str, model_class: Any, default_model_id: str, api_keys: List[str], 
-                db_path: str = "api_usage.db", **kwargs):
+                db_path: str = "api_usage.db", debug: bool = False, **kwargs):
         self.provider = provider.lower()
         self.model_class = model_class
         self.default_model_id = default_model_id
         self.model_kwargs = kwargs
+        self.toggle_debug(debug)
         self.strategy = self.PROVIDER_STRATEGIES.get(self.provider, RateLimitStrategy.PER_MODEL)
         self.manager = RotatingKeyManager(api_keys, self.provider, self.strategy, db_path)
         self._model_cache = {}
+        self.console = Console()
+
+    def toggle_debug(self, enable: bool):
+        """
+        Dynamically switches logging verbosity for this module.
+        enable=True  -> Shows detailed rotation/reservation logs (DEBUG)
+        enable=False -> Shows only key info/warnings (INFO)
+        """
+        level = logging.DEBUG if enable else logging.INFO
+        # Set the logger for the current file context
+        logger.setLevel(level)
+        
+        status = "ENABLED" if enable else "DISABLED"
+        logger.info(f"Debug logging {status} for {self.provider}")
 
     def get_key_usage(self, model_id: str = None, estimated_tokens: int = 1000, wait: bool = True, timeout: float = 10):
         """Finds a valid key"""
@@ -631,14 +693,15 @@ class MultiProviderWrapper:
 
     def get_model(self, estimated_tokens: int = 1000, wait: bool = True, timeout: float = 10, max_retries: int = 5, **kwargs):
         """Dynamically creates a rotating model for ANY provider."""
-        model_id = kwargs.get('id', self.default_model_id)  
-        
-        RotatingProviderClass = type(
-            f"Rotating{self.model_class.__name__}", 
-            (RotatingCredentialsMixin, self.model_class), 
-            {}
-        )
+        if self._RotatingClass is None:
+            self._RotatingClass = type(
+                f"Rotating{self.model_class.__name__}",
+                (RotatingCredentialsMixin, self.model_class),
+                {}
+            )
+        RotatingProviderClass = self._RotatingClass
         # 2. Get Initial Key
+        model_id = kwargs.get('id', self.default_model_id)  
         initial_key_usage = self.get_key_usage(model_id, estimated_tokens, wait=wait, timeout=timeout)
         final_kwargs = {**self.model_kwargs, **kwargs}
         if 'id' not in final_kwargs:
@@ -659,85 +722,177 @@ class MultiProviderWrapper:
         def metrics_hook(*args, **kwargs):
             if orig_metrics:
                 m = orig_metrics(*args, **kwargs)
-                if m and hasattr(m, 'total_tokens'):
-                    current_key = model_instance.api_key
-                    self.manager.record_usage(current_key, model_id, m.total_tokens)
-                return m
-            return None
+            else:
+                m = None
+            actual = 0
+            if m and hasattr(m, 'total_tokens') and m.total_tokens is not None:
+                actual = m.total_tokens
+            current_key = model_instance.api_key
+            # Retrieve the estimate we set on the instance earlier
+            estimate = getattr(model_instance, "_estimated_tokens", 1000)
+            self.manager.record_usage(
+                api_key=current_key, 
+                model_id=model_id, 
+                actual_tokens=actual, 
+                estimated_tokens=estimate
+            )
+            return m
+        
         model_instance._get_metrics = metrics_hook
-
         return model_instance
     
     # --- PRINTING HELPERS ---
     
-    def _print_key_header(self, index: int, suffix: str, extra: str = ""):
-        header = f"Key #{index + 1} (...{suffix})"
-        if extra:
-            header += f" | {extra}"
-        print(header)
-    
-    def _print_snapshot(self, s: UsageSnapshot, indent: str = ""):
-        print(f"{indent}Reqs: {s.rpm} m | {s.rph} h | {s.rpd} d  (Total: {s.total_requests})")
-        print(f"{indent}Toks: {s.tpm:,} m | {s.tph:,} h | {s.tpd:,} d  (Total: {s.total_tokens:,})")
+    def _create_usage_table(self, title: str, data: List[tuple[str, UsageSnapshot]]) -> Table:
+        """
+        Generates a standardized table for usage stats.
+        data format: [(Label, Snapshot), ...]
+        """
+        # Palette
+        c_title = "#bae1ff"  # Pastel Rose
+        c_head  = "#f2f2f2"  # Pastel Cream
+        c_req   = "#faa0a0"  # Pastel Periwinkle
+        c_tok   = "#e5baff"  # Pastel Peach
+        c_border= "#B9B9B9"  # Muted Grey
+        c_identifier = "#7cd292"  # Soft Mauve
         
+        table = Table(
+            title=title, 
+            box=box.ROUNDED, 
+            expand=False, 
+            title_style=f"bold {c_title}",
+            title_justify="left",
+            border_style=c_border,
+            header_style=f"{c_head}"
+        )
+
+        # Define Columns
+        table.add_column("Identifier", style=f"bold {c_identifier}", no_wrap=True)
+        table.add_column("Requests (m/h/d)",  justify="center", style=c_req, no_wrap=True)
+        table.add_column("Tokens (m/h/d)",  justify="center", style=c_tok, no_wrap=True)
+        table.add_column("Total Reqs", justify="center", style=f"{c_req}", no_wrap=True)
+        table.add_column("Total Tokens", justify="center", style=f"bold {c_tok}", no_wrap=True)
+
+        for label, s in data:
+            req_str = f"{s.rpm} / {s.rph} / {s.rpd}"
+            tok_str = f"{s.tpm:,} / {s.tph:,} / {s.tpd:,}"
+            
+            table.add_row(
+                label,
+                req_str,
+                tok_str,
+                f"{s.total_requests}",
+                f"{s.total_tokens:,}"
+            )
+        return table
+
     def print_global_stats(self):
         stats = self.manager.get_global_stats()
-        print(f"\n=== GLOBAL STATS ({self.provider.upper()}) ===")
-        print(f"Total Keys: {len(stats.keys)}")
         
-        print("Aggregate Totals:")
-        self._print_snapshot(stats.total)
-        print("-" * 40)
+        # 1. Prepare Data for the Table
+        rows = []
         for k in stats.keys:
-            print() # Spacer
-            self._print_key_header(k.index, k.suffix)
-            self._print_snapshot(k.snapshot, indent="  ")
-    
+            label = f"Key #{k.index+1} (..{k.suffix})"
+            rows.append((label, k.snapshot))
+            
+        # 2. Create and Print Table
+        table = self._create_usage_table(
+            title=f"GLOBAL STATS: {escape(self.provider.upper())}", 
+            data=rows
+        )
+        
+        # 3. Add a Summary Footer (using a Panel for the Total)
+        total_s = stats.total
+        grid = Table.grid(padding=(0, 4)) 
+        grid.add_column(style="#e0e0e0") # Label Color
+        grid.add_column(style="bold", justify="left") # Value Color
+
+        grid.add_row("Total Requests:", f"[{'#faa0a0'}]{total_s.total_requests}[/]")
+        grid.add_row("Total Tokens:",   f"[{'#e5baff'}]{total_s.total_tokens:,}[/]")
+        
+        self.console.print()
+        self.console.print(Panel(
+            grid, 
+            title="[bold #bae1ff] AGGREGATE TOTALS [/]", 
+            border_style="#bae1ff",
+            expand=False
+        ))
+        self.console.print(table)
+
     def print_key_stats(self, identifier: Union[int, str]):
         stats = self.manager.get_key_stats(identifier)
-        if not stats: return print(f"Key not found: {identifier}")
+        if not stats:
+            self.console.print(f"[bold red]Key not found:[/][white] {identifier}[/]")
+            return
         
-        self._print_key_header(stats.index, stats.suffix, extra="FULL REPORT")
-        print()
+        self.console.print()
+        self.console.rule(f"[bold]Key Report: {stats.suffix}[/]")
         
-        print("Total Usage (All Models):")
-        self._print_snapshot(stats.total)
+        # 1. Total Snapshot Panel
+        s = stats.total
+        grid = Table.grid(padding=(0, 4))
+        grid.add_column(style="#e0e0e0")
+        grid.add_column(justify="left")
+
+        grid.add_row("Total Requests:", f"[{'#faa0a0'}]{s.total_requests}[/]")
+        grid.add_row("Total Tokens:",   f"[{'#e5baff'}]{s.total_tokens:,}[/]")
         
-        print("\nModel Breakdown:")
+        self.console.print(Panel(
+            grid, 
+            title=f"[bold #97e3e9]Key #{stats.index+1} Overview[/]", 
+            border_style="#bae1ff",
+            expand=False
+        ))
+
+        # 2. Breakdown Table
         if not stats.breakdown:
-            print("  (No usage recorded)")
-        for mid, snap in stats.breakdown.items():
-            print(f"\n  [Model: {mid}]")
-            self._print_snapshot(snap, indent="    ")
-    
+            self.console.print("[italic dim]No usage recorded for this key yet.[/]")
+        else:
+            rows = [(model_id, snap) for model_id, snap in stats.breakdown.items()]
+            table = self._create_usage_table(title="Breakdown by Model", data=rows)
+            self.console.print(table)
+
     def print_model_stats(self, model_id: str):
         data = self.manager.get_model_stats(model_id)
-        print(f"\n=== MODEL STATS ({data.model_id}) ===")
-        print("Total Usage (All Keys):")
-        self._print_snapshot(data.total)
         
-        print(f"\n=== Contributing Keys ===")
+        self.console.print()
+        self.console.rule(f"[bold]Model Report: {model_id}[/]", style="#B9B9B9")
+        
+        # 1. Total Summary
+        s = data.total
+        self.console.print(f"Total Tokens Consumed: [bold green]{s.total_tokens:,}[/]")
+        
+        # 2. Contributing Keys Table
         if not data.keys:
-            print("  (No keys have used this model)")
+            self.console.print("[italic dim]No keys have used this model.[/]")
+        else:
+            rows = []
+            for k in data.keys:
+                label = f"Key #{k.index+1} (..{k.suffix})"
+                rows.append((label, k.snapshot))
             
-        for k in data.keys:
-            print()
-            self._print_key_header(k.index, k.suffix)
-            self._print_snapshot(k.snapshot, indent="  ")
+            table = self._create_usage_table(title="Contributing Keys", data=rows)
+            self.console.print(table)
 
     def print_granular_stats(self, identifier: Union[int, str], model_id: str):
         data = self.manager.get_granular_stats(identifier, model_id)
         
-        print(f"\n=== PRINTING GRANULAR STATS ===")
-        
         if not data:
-            print(f"Key identifier '{identifier}' not found.")
+            self.console.print(f"[bold red]Key '{identifier}' not found.[/]")
             return
 
-        self._print_key_header(data.index, data.suffix, extra=f"Model: {model_id}")
-        
+        self.console.print()
         if data.snapshot:
-            self._print_snapshot(data.snapshot)
+            # Re-use the table builder for a single row just for consistency
+            label = f"Key #{data.index+1} (..{data.suffix})"
+            table = self._create_usage_table(
+                title=f"Granular: {model_id}", 
+                data=[(label, data.snapshot)]
+            )
+            self.console.print(table)
         else:
-            print("  (No usage record for this specific combination)")
-        
+            self.console.print(Panel(
+                f"No usage for model [bold]{model_id}[/] on key [bold]..{data.suffix}[/]",
+                style="#e5baff",
+                border_style="#B9B9B9"
+            ))

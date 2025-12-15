@@ -8,3 +8,4 @@ api_key_rotater.egg-info/top_level.txt
 key_manager/__init__.py
 key_manager/env_manager.py
 key_manager/env_test.py
+key_manager/log_config.py

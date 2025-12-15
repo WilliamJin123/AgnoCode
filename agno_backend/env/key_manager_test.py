@@ -4,6 +4,7 @@ from agno.agent import Agent
 from agno.models.cerebras import Cerebras
 from agno.models.groq import Groq
 from agno.models.google import Gemini
+from agno.models.openrouter import OpenRouter
 
 ENV_FILE = ".env"
 DB_FILE = "api_usage.db"
@@ -16,7 +17,7 @@ async def main():
     cerebras = MultiProviderWrapper.from_env("cerebras", Cerebras, 'llama3.1-8b', env_file=ENV_FILE, db_path=DB_FILE)
     groq = MultiProviderWrapper.from_env("groq", Groq, 'llama-3.3-70b-versatile', env_file=ENV_FILE, db_path=DB_FILE)
     gemini = MultiProviderWrapper.from_env("gemini", Gemini, 'gemini-2.5-flash', env_file=ENV_FILE, db_path=DB_FILE)
-
+    openrouter = MultiProviderWrapper.from_env("openrouter", OpenRouter, 'qwen/qwen3-coder:free', env_file=ENV_FILE, db_path=DB_FILE)
     # 2. Test Basic Rotation (Cerebras)
     print("\n[CEREBRAS] Testing Key Rotation (3 Requests)")
     for i in range(3):
@@ -57,6 +58,18 @@ async def main():
     except Exception as e:
         print(f"  Error: {e}")
 
+    print("\n[OPENROUTER] Testing Free Model with Key Rotation")
+    openrouter_last_key = None
+    try:
+        model = openrouter.get_model()
+        openrouter_last_key = model.api_key
+        print(f"  Req {i+1}: Key ...{model.api_key[-8:]} -> ", end="", flush=True)
+        
+        agent = Agent(model=model)
+        agent.print_response("Write a Python function to add two numbers.", stream=False)
+    except Exception as e:
+        print(f"Failed: {e}")
+
     # 5. Test Statistics
     print("\n" + "="*20 + " STATS AUDIT " + "="*20)
     
@@ -75,5 +88,14 @@ async def main():
 
     print("\n--- TEST COMPLETE ---")
 
+    if openrouter_last_key:
+        print(f"\n7. Key Stats (OpenRouter - {openrouter_last_key[-8:]}):")
+        openrouter.print_key_stats(openrouter_last_key)
+
+        print(f"\n8. Granular Stats (OpenRouter Key + qwen/qwen3-coder:free):")
+        openrouter.print_granular_stats(openrouter_last_key, 'qwen/qwen3-coder:free')
+
+    print("\n--- TEST COMPLETE ---")
+    
 if __name__ == "__main__":
     asyncio.run(main())
