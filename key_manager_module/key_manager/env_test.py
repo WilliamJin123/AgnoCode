@@ -1,58 +1,64 @@
 import asyncio
+import os
+from typing import Dict
 from agno.agent import Agent
-from agno.models.cerebras import Cerebras
-from agno.models.groq import Groq
-from agno.models.google import Gemini
+# Note: Specific model imports (Cerebras, Groq, etc.) are no longer 
+# strictly required here as MultiProviderWrapper handles the dynamic import.
+from env_manager import MultiProviderWrapper 
 
-# Adjust import path as needed
-from env_manager import MultiProviderWrapper
+from dotenv import load_dotenv
 
-# 1. Setup Wrappers
-cerebras_wrapper = MultiProviderWrapper.from_env(
-    provider='cerebras',
-    model_class=Cerebras, 
-    default_model_id='llama3.1-8b', 
-    temperature=0.7,
-    env_file="./local.env"
-)
+LOCAL_ENV_PATH = "./local.env"
 
-groq_wrapper = MultiProviderWrapper.from_env(
-    provider='groq',
-    model_class=Groq,
-    default_model_id='llama-3.3-70b-versatile',
-    env_file="./local.env"
-)
-
-gemini_wrapper = MultiProviderWrapper.from_env(
-    provider='gemini',
-    model_class=Gemini,
-    default_model_id='gemini-2.5-flash',
-    env_file="./local.env"
-)
-
-wrappers = {
-    "Cerebras": cerebras_wrapper, 
-    "Groq": groq_wrapper, 
-    "Gemini": gemini_wrapper
-}
-
-request_prompt = "Write a 1-sentence interesting fact about space."
+load_dotenv(dotenv_path=LOCAL_ENV_PATH, override=True,)
 
 async def main():
-    # Store usage data to demonstrate specific reports later
+    cerebras_wrapper = MultiProviderWrapper.from_env(
+        provider='cerebras',
+        default_model_id='llama-3.3-70b',
+        env_file=LOCAL_ENV_PATH,
+        temperature=0.7
+    )
+
+    groq_wrapper = MultiProviderWrapper.from_env(
+        provider='groq',
+        default_model_id='llama-3.3-70b-versatile',
+        env_file=LOCAL_ENV_PATH,
+        top_p=0.95,
+    )
+
+    gemini_wrapper = MultiProviderWrapper.from_env(
+        provider='gemini',
+        default_model_id='gemini-2.5-flash',
+        env_file=LOCAL_ENV_PATH,
+        top_k=10
+    )
+    openrouter_wrapper = MultiProviderWrapper.from_env(
+        provider='openrouter',
+        default_model_id='nvidia/nemotron-nano-12b-v2-vl:free',
+        env_file="./local.env"
+    )
+
+    wrappers: Dict[str, MultiProviderWrapper] = {
+        "Cerebras": cerebras_wrapper, 
+        "Groq": groq_wrapper, 
+        "Gemini": gemini_wrapper,
+        "OpenRouter": openrouter_wrapper
+    }
+
+    request_prompt = "Write a 1-sentence interesting fact about space."
     usage_history = {} 
 
     print(f"\n{'='*20} STARTING REQUESTS {'='*20}")
+    print(f"Cloud DB: {os.getenv("TURSO_DATABASE_URL", "Couldn't find in Local Env")}")
 
     for provider_name, wrapper in wrappers.items():
         print(f"\n--- Running {provider_name} ---")
         
         try:
-            # 1. Get Model
             model = wrapper.get_model(estimated_tokens=500, wait=True, timeout=20)
             
             # 2. Capture Identifier for Reports
-            # We use the key suffix to query stats later
             used_key = model.api_key 
             used_model_id = wrapper.default_model_id
             
@@ -61,17 +67,19 @@ async def main():
                 "model_id": used_model_id
             }
             
+            # 3. Initialize Agno Agent with our rotating model
             agent = Agent(model=model, markdown=True)
             
-            # 3. Execute
             print(f"-> Using Key: ...{used_key[-8:]}")
-            await agent.aprint_response(request_prompt, stream=True)
+            # This triggers ainvoke_stream -> _rotate_credentials -> _get_metrics -> record_usage
+            await agent.aprint_response(request_prompt, stream=True, show_reasoning=True)
             
         except Exception as e:
             print(f"-> FAILED: {e}")
             usage_history[provider_name] = None
 
-        await asyncio.sleep(0.5)
+        # Short sleep to allow the AsyncLogger to process the Turso batch
+        await asyncio.sleep(1)
 
     print(f"\n\n{'='*20} GENERATING REPORTS {'='*20}")
 
@@ -82,24 +90,21 @@ async def main():
 
         print(f"\n\n>>> REPORTS FOR {provider_name.upper()} <<<\n")
 
-        # 1. Global Stats (All keys, all models)
-        # Useful for: High-level dashboard
+        # Global Stats: Now hydrated from Turso in O(1)
         wrapper.print_global_stats()
         
-        # 2. Key Stats (Specific Key)
-        # Useful for: Checking if a specific key is hitting limits
+        # Key Stats: Shows current usage + last_429 cooldown status
         wrapper.print_key_stats(identifier=history['key'])
 
-        # 3. Model Stats (Specific Model)
-        # Useful for: Checking which keys are contributing to a heavy model
+        # Model Stats: Aggregates across your rotation pool
         wrapper.print_model_stats(model_id=history['model_id'])
 
-        # 4. Granular Stats (Specific Key + Specific Model)
-        # Useful for: Debugging specific key/model pairings
-        wrapper.print_granular_stats(
-            identifier=history['key'], 
-            model_id=history['model_id']
-        )
+    # Final cleanup to flush Turso logs before script exit
+    for wrapper in wrappers.values():
+        wrapper.manager.stop()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        pass

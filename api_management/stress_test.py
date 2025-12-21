@@ -71,10 +71,10 @@ async def run_stress_test(provider_name, wrapper, model_id, limit_attribute_name
             await asyncio.sleep(2)
 async def main():
     # 1. Initialize Wrappers
-    cerebras = MultiProviderWrapper.from_env("cerebras", Cerebras, 'zai-glm-4.6', env_file=ENV_FILE, db_path=DB_FILE)
-    groq = MultiProviderWrapper.from_env("groq", Groq, 'groq/compound-mini', env_file=ENV_FILE, db_path=DB_FILE)
-    gemini = MultiProviderWrapper.from_env("gemini", Gemini, 'gemini-2.5-flash', env_file=ENV_FILE, db_path=DB_FILE)
-    openrouter = MultiProviderWrapper.from_env("openrouter", OpenRouter, 'tngtech/deepseek-r1t2-chimera:free', env_file=ENV_FILE, db_path=DB_FILE)
+    cerebras = MultiProviderWrapper.from_env("cerebras", env_file=ENV_FILE)
+    groq = MultiProviderWrapper.from_env("groq", 'groq/compound-mini', env_file=ENV_FILE)
+    gemini = MultiProviderWrapper.from_env("gemini", 'gemini-2.5-flash', env_file=ENV_FILE)
+    openrouter = MultiProviderWrapper.from_env("openrouter", 'tngtech/deepseek-r1t2-chimera:free', env_file=ENV_FILE)
     
     # 2. Run Stress Tests
     

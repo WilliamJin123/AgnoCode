@@ -4,6 +4,7 @@ from agno.agent import Agent
 from agno.models.groq import Groq
 from agno.models.cerebras import Cerebras
 from agno.models.google.gemini import Gemini
+from agno.models.openrouter import OpenRouter
 
 load_dotenv(".env", override=True)
 
@@ -28,5 +29,7 @@ def test_provider_keys(prefix, provider_class, model_id, prompt="Say Hello."):
     input("Press Enter to continue...")
 
 # test_provider_keys("GROQ", Groq, "llama-3.3-70b-versatile")
-test_provider_keys("CEREBRAS", Cerebras, "zai-glm-4.6")
+# test_provider_keys("CEREBRAS", Cerebras, "zai-glm-4.6")
 # test_provider_keys("GEMINI", Gemini, "gemini-2.5-flash")
+test_provider_keys("OPENROUTER", OpenRouter, "xiaomi/mimo-v2-flash:free")
+

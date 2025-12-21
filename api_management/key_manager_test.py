@@ -1,10 +1,7 @@
 import asyncio
 from key_manager import MultiProviderWrapper
 from agno.agent import Agent
-from agno.models.cerebras import Cerebras
-from agno.models.groq import Groq
-from agno.models.google import Gemini
-from agno.models.openrouter import OpenRouter
+
 
 ENV_FILE = ".env"
 DB_FILE = "api_usage.db"
@@ -14,10 +11,10 @@ async def main():
 
     # 1. Initialize Wrappers
     print("Initializing Wrappers...")
-    cerebras = MultiProviderWrapper.from_env("cerebras", Cerebras, 'llama3.1-8b', env_file=ENV_FILE, db_path=DB_FILE)
-    groq = MultiProviderWrapper.from_env("groq", Groq, 'llama-3.3-70b-versatile', env_file=ENV_FILE, db_path=DB_FILE)
-    gemini = MultiProviderWrapper.from_env("gemini", Gemini, 'gemini-2.5-flash', env_file=ENV_FILE, db_path=DB_FILE)
-    openrouter = MultiProviderWrapper.from_env("openrouter", OpenRouter, 'qwen/qwen3-coder:free', env_file=ENV_FILE, db_path=DB_FILE)
+    cerebras = MultiProviderWrapper.from_env("cerebras", 'llama3.1-8b', env_file=ENV_FILE, db_path=DB_FILE)
+    groq = MultiProviderWrapper.from_env("groq", 'llama-3.3-70b-versatile', env_file=ENV_FILE, db_path=DB_FILE)
+    gemini = MultiProviderWrapper.from_env("gemini", 'gemini-2.5-flash', env_file=ENV_FILE, db_path=DB_FILE)
+    openrouter = MultiProviderWrapper.from_env("openrouter", 'qwen/qwen3-coder:free', env_file=ENV_FILE)
     # 2. Test Basic Rotation (Cerebras)
     print("\n[CEREBRAS] Testing Key Rotation (3 Requests)")
     for i in range(3):

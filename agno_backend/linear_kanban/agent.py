@@ -1,16 +1,15 @@
 from agno.agent import Agent
 from agno.team import Team
-from agno.models.groq import Groq
-from agno.models.cerebras import Cerebras
-from architect_tools import LinearTools
-from key_manager import MultiProviderWrapper
 from agno.db.sqlite import SqliteDb
 from agno.session import SessionSummaryManager
 from agno.compression import CompressionManager
 import os
 
-ENV_FILE="../env/.env"
-DB_FILE="../env/api_usage.db"
+from architect_tools import LinearTools
+from key_manager import MultiProviderWrapper
+
+ENV_FILE="../../api_management/.env"
+# DB_FILE="../env/api_usage.db"
 README_PATH="../../README.md"
 
 LINEAR_API_KEY=os.getenv("LINEAR_API_KEY")
@@ -34,28 +33,29 @@ linear_tools = LinearTools(api_key=LINEAR_API_KEY)
 
 groq_wrapper = MultiProviderWrapper.from_env(
     provider='groq',
-    model_class=Groq,
     default_model_id='moonshotai/kimi-k2-instruct-0905',
     env_file=ENV_FILE,
-    db_path=DB_FILE,
+
 )
 
 cerebras_wrapper = MultiProviderWrapper.from_env(
     provider='cerebras',
-    model_class=Cerebras,
     default_model_id='llama-3.3-70b',
     env_file=ENV_FILE,
-    db_path=DB_FILE
 )
 
 s_sum_manager = SessionSummaryManager(
-    model=groq_wrapper.get_model(id="llama-3.3-70b-versatile", estimated_tokens=500),
+    model=groq_wrapper.get_model(
+        id="llama-3.3-70b-versatile", estimated_tokens=500
+    ),
     summary_request_message="Provide the summary of the conversation. Include all relevant details",
     
 )
 
 tool_compression_manager = CompressionManager(
-    model=groq_wrapper.get_model(id="llama-3.3-70b-versatile", estimated_tokens=2000),
+    model=groq_wrapper.get_model(
+        id="llama-3.3-70b-versatile", estimated_tokens=2000
+    ),
     compress_tool_results_limit=4
 )
 
@@ -150,7 +150,9 @@ def get_linear_agent( debug_mode = True, debug_level = 2, **kwargs):
     # model=groq_wrapper.get_model(),
     # model=cerebras_wrapper.get_model(id="zai-glm-4.6"),
     # model=cerebras_wrapper.get_model(id="qwen-3-235b-a22b-instruct-2507"),
-    model=cerebras_wrapper.get_model(id="gpt-oss-120b", estimated_tokens=3000,),
+    model=cerebras_wrapper.get_model(
+        id="gpt-oss-120b", estimated_tokens=3000,
+    ),
     tools=[linear_tools],
     tool_call_limit=50,
     description=desc,

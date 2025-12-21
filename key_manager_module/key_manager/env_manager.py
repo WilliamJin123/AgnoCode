@@ -11,6 +11,8 @@ from pathlib import Path
 from dotenv import load_dotenv
 from collections import defaultdict, deque
 from enum import Enum
+import importlib
+import libsql_client # The Turso client
 
 from rich.console import Console
 from rich.table import Table
@@ -29,6 +31,31 @@ logger = logging.getLogger(__name__)
 class RateLimitStrategy(Enum):
     PER_MODEL = "per_model"  # Cerebras, Groq, Gemini
     GLOBAL = "global"        # OpenRouter (Shared limits across all models)
+
+def get_agno_model_class(provider: str):
+    """
+    Dynamically maps a provider string to the actual Agno model class.
+    """
+    p_low = provider.lower()
+
+    overrides = {
+        "openai": "OpenAI",
+        "google": "Gemini",
+        "gemini": "Gemini",
+        "azure": "AzureOpenAI",
+        "aws": "Bedrock",
+        "openrouter": "OpenRouter"
+    }
+
+    class_name = overrides.get(p_low, p_low.capitalize())
+
+    module_path = "google" if p_low in ["google", "gemini"] else p_low
+    
+    try:
+        module = importlib.import_module(f"agno.models.{module_path}")
+        return getattr(module, class_name)
+    except (ImportError, AttributeError) as e:
+        raise ValueError(f"Agno class '{class_name}' not found for provider '{provider}': {e}")
 
 # --- CONFIGURATION DATA ---
 
@@ -66,16 +93,30 @@ class UsageSnapshot:
 # --- DATABASE LAYER ---
 
 class UsageDatabase:
-    """Handles SQLite persistence for API usage"""
-    def __init__(self, db_path: str = "api_usage.db"):
-        self.db_path = db_path
-        self._init_db()
+    """Handles Online LibSQL (Turso) persistence for API usage"""
+    def __init__(self, db_url: Optional[str] = None, auth_token: Optional[str] = None):
+        raw_url = db_url or os.getenv("TURSO_DATABASE_URL")
+        if raw_url:
+            if raw_url.startswith("libsql://"):
+                raw_url = raw_url.replace("libsql://", "https://")
+            elif raw_url.startswith("wss://"):
+                raw_url = raw_url.replace("wss://", "https://")
         
+        self.db_url = raw_url
+        self.auth_token = auth_token or os.getenv("TURSO_AUTH_TOKEN")
+        self._init_db()
+    
+    def _get_client(self, synchronous = True):
+        if synchronous:
+            return libsql_client.create_client_sync(url=self.db_url, auth_token=self.auth_token)
+        else:
+            return libsql_client.create_client(url=self.db_url, auth_token=self.auth_token)
+
     def _init_db(self):
-        with sqlite3.connect(self.db_path, check_same_thread=False, isolation_level=None) as conn:
+        with self._get_client() as client:
             # Create table for request logs
-            conn.execute("PRAGMA journal_mode=WAL;")
-            conn.execute("""
+            # client.execute("PRAGMA journal_mode=WAL;")
+            client.execute("""
                 CREATE TABLE IF NOT EXISTS usage_logs (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     provider TEXT,
@@ -85,16 +126,16 @@ class UsageDatabase:
                     tokens INTEGER
                 )
             """)
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_key_usage ON usage_logs(provider, api_key_suffix, timestamp)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_cleanup ON usage_logs(timestamp)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_model_reporting ON usage_logs(provider, model, timestamp)")     
+            client.execute("CREATE INDEX IF NOT EXISTS idx_key_usage ON usage_logs(provider, api_key_suffix, timestamp)")
+            client.execute("CREATE INDEX IF NOT EXISTS idx_cleanup ON usage_logs(timestamp)")
+            client.execute("CREATE INDEX IF NOT EXISTS idx_model_reporting ON usage_logs(provider, model, timestamp)")     
 
     def load_history(self, provider: str, api_key: str, seconds_lookback: int) -> List[tuple[str, float, int]]:
         """Load history SPECIFIC to this Provider + Model combination"""
         suffix = api_key[-8:] if len(api_key) > 8 else api_key
         cutoff = time.time() - seconds_lookback    
-        with sqlite3.connect(self.db_path, check_same_thread=False, isolation_level=None) as conn:
-            cursor = conn.execute(
+        with self._get_client() as client:
+            rs = client.execute(
                 """
                 SELECT model, timestamp, tokens FROM usage_logs 
                 WHERE provider = ? AND api_key_suffix = ? AND timestamp > ?
@@ -102,17 +143,28 @@ class UsageDatabase:
                 """,
                 (provider, suffix, cutoff)
             )
-            return cursor.fetchall()
+            return rs.rows
+
+    def load_provider_history(self, provider: str, seconds_lookback: int):
+        """Optimization: Load everything for the provider in ONE call"""
+        cutoff = time.time() - seconds_lookback
+        with self._get_client() as client:
+            rs = client.execute(
+                "SELECT api_key_suffix, model, timestamp, tokens FROM usage_logs "
+                "WHERE provider = ? AND timestamp > ?",
+                (provider, cutoff)
+            )
+            return rs.rows
 
     def prune_old_records(self, days_retention: int = 3):
         """Delete records older than retention period to keep DB small (3 days)"""
         cutoff = time.time() - (days_retention * 86400)
-        with sqlite3.connect(self.db_path, check_same_thread=False, isolation_level=None) as conn:
-            conn.execute("DELETE FROM usage_logs WHERE timestamp < ?", (cutoff,))
+        with self._get_client() as client:
+            client.execute("DELETE FROM usage_logs WHERE timestamp < ?", (cutoff,))
 
 # --- ASYNC LOGGER ---
 class AsyncUsageLogger:
-    """Decouples DB writes from the main thread"""
+    """Decouples Turso DB writes from the main thread using batching."""
     def __init__(self, db: UsageDatabase):
         self.db = db
         self.queue = queue.Queue()
@@ -126,16 +178,19 @@ class AsyncUsageLogger:
 
     def _writer_loop(self):
         batch = []
-        conn = sqlite3.connect(self.db.db_path, check_same_thread=False)
-        conn.execute("PRAGMA journal_mode=WAL;")
-        while not self._stop_event.is_set():
+        client = self.db._get_client()
+        insert_sql = (
+            "INSERT INTO usage_logs (provider, model, api_key_suffix, timestamp, tokens) "
+            "VALUES (?, ?, ?, ?, ?)"
+        )
+        while not self._stop_event.is_set() or not self.queue.empty(): #always empty queue
             try:
-                # Collect items for up to 1 second
+                # Wait for the first item (block for up to 1 second)
                 record = self.queue.get(timeout=1.0)
                 # Parse record for batch formatting
                 provider, model, full_key, ts, tokens = record
                 suffix = full_key[-8:] if len(full_key) > 8 else full_key
-                batch.append((provider, model, suffix, ts, tokens))
+                batch.append((insert_sql, (provider, model, suffix, ts, tokens)))
                 
                 # Drain queue up to 50 items to batch write
                 while len(batch) < 50:
@@ -143,16 +198,12 @@ class AsyncUsageLogger:
                         r = self.queue.get_nowait()
                         p, m, k, t, tok = r
                         s = k[-8:] if len(k) > 8 else k
-                        batch.append((p, m, s, t, tok))
+                        batch.append((insert_sql, (p, m, s, t, tok)))
                     except queue.Empty:
                         break
                 
                 if batch:
-                    conn.executemany(
-                        "INSERT INTO usage_logs (provider, model, api_key_suffix, timestamp, tokens) VALUES (?, ?, ?, ?, ?)",
-                        batch
-                    )
-                    conn.commit()
+                    client.batch(batch)
                     batch.clear()
                 
             except queue.Empty:
@@ -160,21 +211,22 @@ class AsyncUsageLogger:
             except Exception as e:
                 # print(f"Logging thread error: {e}")
                 logger.exception("Logging thread error", exc_info=e)
+                time.sleep(2)
         
         if batch:
             try:
-                conn.executemany(
-                     "INSERT INTO usage_logs (provider, model, api_key_suffix, timestamp, tokens) VALUES (?, ?, ?, ?, ?)",
-                     batch
-                )
-                conn.commit()
-            except: pass
-        conn.close() # Close connection only when thread dies
+                client.batch(batch)
+            except:
+                pass
+        
+        client.close()
         
     def stop(self):
         self._stop_event.set()
         if self._thread.is_alive():
-            self._thread.join(timeout=2)
+            self._thread.join(timeout=10)
+            if self._thread.is_alive():
+                logger.warning("AsyncUsageLogger thread did not exit cleanly within timeout.")
 
 # --- USAGE TRACKING ---
 @dataclass
@@ -268,6 +320,7 @@ class KeyUsage:
     strategy: RateLimitStrategy
     buckets: Dict[str, UsageBucket] = field(default_factory=lambda: defaultdict(UsageBucket))
     global_bucket: UsageBucket = field(default_factory=UsageBucket)
+    last_429: float = 0.0
     
     def record_usage(self, model_id: str, tokens: int, timestamp: float = None):
         ts = timestamp if timestamp else time.time()
@@ -301,6 +354,16 @@ class KeyUsage:
         if self.strategy == RateLimitStrategy.GLOBAL:
             self.global_bucket.commit(actual_tokens, reserved_tokens, ts)
 
+
+    def is_cooling_down(self, cooldown_seconds: int = 30) -> bool:
+        """Returns True if the key is still in its 30s penalty box."""
+        if self.last_429 == 0: return False
+        return (time.time() - self.last_429) < cooldown_seconds
+
+    def trigger_cooldown(self):
+        """Mark this key as rate-limited."""
+        self.last_429 = time.time()
+
 # --- 4. STATS DATA TRANSFER OBJECTS (DTOs) ---
 
 @dataclass
@@ -320,14 +383,15 @@ class RotatingKeyManager:
     """Manages API key rotation with rate limiting"""
     CLEANUP_INTERVAL = 55  # seconds
     
-    def __init__(self, api_keys: List[str], provider_name: str, strategy: RateLimitStrategy, db_path: str = "api_usage.db"):
+    def __init__(self, api_keys: List[str], provider_name: str, 
+                 strategy: RateLimitStrategy, db: UsageDatabase):
         self.provider_name = provider_name
         self.strategy = strategy
         self.keys = [KeyUsage(api_key=k, strategy=strategy) for k in api_keys]
         self.current_index = 0
         self.lock = Lock()
         
-        self.db = UsageDatabase(db_path)
+        self.db = db
         self.logger = AsyncUsageLogger(self.db)
         self._hydrate()
 
@@ -348,11 +412,21 @@ class RotatingKeyManager:
     def _hydrate(self):
         # print(f"[{self.provider_name}] Loading history...")
         logger.debug("Loading history for provider %s.", self.provider_name)
-        for key in self.keys:
-            history = self.db.load_history(self.provider_name, key.api_key, 86400) # 24 hours
-            logger.debug("Loading %d records for key %s.", len(history), key.api_key[-8:])
-            for model_id, timestamp, tokens in history:
-                key.record_usage(model_id, tokens=tokens, timestamp=timestamp)
+        all_history = self.db.load_provider_history(self.provider_name, 86400)
+        if not all_history:
+            logger.info("No history found in Turso for %s.", self.provider_name)
+            return
+        
+        key_map = {k.api_key[-8:]: k for k in self.keys}
+        count = 0
+        for row in all_history:
+            suffix, model_id, ts, tokens = row
+            
+            if suffix in key_map:
+                key_map[suffix].record_usage(model_id, tokens=tokens, timestamp=ts)
+                count += 1
+        logger.info("Hydrated %d records across %d keys for %s.", 
+                    count, len(self.keys), self.provider_name)
     
     def _cleanup_loop(self):
         """Periodically clean deques to prevent memory bloat"""
@@ -376,7 +450,7 @@ class RotatingKeyManager:
         self._stop_event.set()
         self.logger.stop() # Flush logs
         if self._thread.is_alive():
-            self._thread.join(timeout=2)
+            self._thread.join(timeout=10)
     
     def get_key(self, model_id: str, limits: RateLimits, estimated_tokens: int = 1000) -> Optional[KeyUsage]:
         """Get an available API key that can handle the request"""
@@ -384,22 +458,21 @@ class RotatingKeyManager:
             for offset in range(len(self.keys)):
                 idx = (self.current_index + offset) % len(self.keys)
                 key : KeyUsage = self.keys[idx]
-                
+
+                if key.is_cooling_down(30):
+                    continue
+
                 if key.can_use_model(model_id, limits, estimated_tokens):
                     key.reserve(model_id, estimated_tokens)
                     self.current_index = idx
                     return key
             return None
     
-    def record_usage(self, api_key: Union[str, KeyUsage], model_id: str,actual_tokens: int, estimated_tokens: int = 1000):
+    def record_usage(self, key_obj: KeyUsage, model_id: str,actual_tokens: int, estimated_tokens: int = 1000):
         """Record usage for a specific API key"""
-        key_identifier = api_key if isinstance(api_key, str) else api_key.api_key
         with self.lock:
-            for key in self.keys:
-                if key.api_key == key_identifier:
-                    key.commit(model_id, actual_tokens, estimated_tokens)
-                    break  
-        self.logger.log(self.provider_name, model_id, key_identifier, actual_tokens)
+            key_obj.commit(model_id, actual_tokens, estimated_tokens)
+        self.logger.log(self.provider_name, model_id, key_obj.api_key, actual_tokens)
                 
     # --- STATS HELPERS ---
     
@@ -461,11 +534,10 @@ class RotatingKeyManager:
         
 class RotatingCredentialsMixin:
     """
-    A universal Mixin that forces a key rotation and client rebuild
-    before every single model invocation.
+    Mixin that handles key rotation, 429 detection, and 30s cooldown triggers.
     """
     
-    def _rotate_credentials(self):
+    def _rotate_credentials(self) -> KeyUsage:
         key_usage: KeyUsage = self.wrapper.get_key_usage(
             model_id=self.id,
             estimated_tokens=self._estimated_tokens,
@@ -477,6 +549,8 @@ class RotatingCredentialsMixin:
         if hasattr(self, "client"): self.client = None
         if hasattr(self, "async_client"): self.async_client = None
         if hasattr(self, "gemini_client"): self.gemini_client = None
+
+        return key_usage
 
     def _is_rate_limit_error(self, e: Exception) -> bool:
         """Heuristic to detect rate limits across different providers"""
@@ -496,13 +570,14 @@ class RotatingCredentialsMixin:
         limit = self._get_retry_limit()
         
         for attempt in range(limit + 1):
-            try:
-                self._rotate_credentials()
+            key_usage = self._rotate_credentials()
+            try:  
                 return super().invoke(*args, **kwargs)
             except Exception as e:
                 if self._is_rate_limit_error(e) and attempt < limit:
                     # print(f" 429 Hit on key ...{self.api_key[-8:]} (Sync). Rotating and retrying ({attempt+1}/{limit})...")
                     logger.warning("429 Hit on key %s (Sync). Rotating and retrying (%d/%d).", self.api_key[-8:], attempt + 1, limit)
+                    key_usage.trigger_cooldown()
                     self.wrapper.manager.force_rotate_index()
                     continue
                 raise e
@@ -511,13 +586,14 @@ class RotatingCredentialsMixin:
         limit = self._get_retry_limit()
         
         for attempt in range(limit + 1):
+            key_usage = self._rotate_credentials()
             try:
-                self._rotate_credentials()
                 return await super().ainvoke(*args, **kwargs)
             except Exception as e:
                 if self._is_rate_limit_error(e) and attempt < limit:
                     # print(f" 429 Hit on key ...{self.api_key[-8:]} (Async). Rotating and retrying ({attempt+1}/{limit})...")
                     logger.warning("429 Hit on key %s (Async). Rotating and retrying (%d/%d).", self.api_key[-8:], attempt + 1, limit)
+                    key_usage.trigger_cooldown()
                     self.wrapper.manager.force_rotate_index()
                     continue
                 raise e
@@ -526,14 +602,15 @@ class RotatingCredentialsMixin:
         limit = self._get_retry_limit()
         
         for attempt in range(limit + 1):
-            try:
-                self._rotate_credentials()
+            key_usage = self._rotate_credentials()
+            try:  
                 yield from super().invoke_stream(*args, **kwargs)
                 return
             except Exception as e:
                 if self._is_rate_limit_error(e) and attempt < limit:
                     # print(f" 429 Hit on key ...{self.api_key[-8:]} (Sync Stream). Rotating and retrying ({attempt+1}/{limit})...")
                     logger.warning("429 Hit on key %s (Sync Stream). Rotating and retrying (%d/%d).", self.api_key[-8:], attempt + 1, limit)
+                    key_usage.trigger_cooldown()
                     self.wrapper.manager.force_rotate_index()
                     continue
                 raise e
@@ -542,8 +619,8 @@ class RotatingCredentialsMixin:
         limit = self._get_retry_limit()
         
         for attempt in range(limit + 1):
+            key_usage = self._rotate_credentials()
             try:
-                self._rotate_credentials()
                 async for chunk in super().ainvoke_stream(*args, **kwargs): 
                     yield chunk
                 return
@@ -551,6 +628,7 @@ class RotatingCredentialsMixin:
                 if self._is_rate_limit_error(e) and attempt < limit:
                     # print(f" 429 Hit on key ...{self.api_key[-8:]} (Async Stream). Rotating and retrying ({attempt+1}/{limit})...")
                     logger.warning("429 Hit on key %s (Async Stream). Rotating and retrying (%d/%d).", self.api_key[-8:], attempt + 1, limit)
+                    key_usage.trigger_cooldown()
                     self.wrapper.manager.force_rotate_index()
                     continue
                 raise e
@@ -643,20 +721,31 @@ class MultiProviderWrapper:
         return api_keys
     
     @classmethod
-    def from_env(cls, provider: str, model_class: Any, default_model_id: str, 
-                 env_file: Optional[str] = None, db_path: str = "api_usage.db", debug: bool = False, **kwargs):
+    def from_env(cls, provider: str, default_model_id: str, 
+        env_file: Optional[str] = None,
+        db_url: Optional[str] = None,
+        db_token: Optional[str] = None,
+        debug: bool = False, **kwargs):
+        
+        model_class = get_agno_model_class(provider)
         api_keys = cls.load_api_keys(provider, env_file)
-        return cls(provider, model_class, default_model_id, api_keys, db_path, debug, **kwargs)
+        db_url = db_url or os.getenv("TURSO_DATABASE_URL")
+        db_token = db_token or os.getenv("TURSO_AUTH_TOKEN")
+        return cls(provider, model_class, default_model_id, 
+                   api_keys, db_url, db_token, debug, **kwargs)
     
-    def __init__(self, provider: str, model_class: Any, default_model_id: str, api_keys: List[str], 
-                db_path: str = "api_usage.db", debug: bool = False, **kwargs):
+    def __init__(self, provider: str, model_class: Any, 
+                default_model_id: str, api_keys: List[str], 
+                db_url: Optional[str] = None, db_token: Optional[str] = None,
+                debug: bool = False, **kwargs):
         self.provider = provider.lower()
         self.model_class = model_class
         self.default_model_id = default_model_id
         self.model_kwargs = kwargs
         self.toggle_debug(debug)
+        self.db = UsageDatabase(db_url, db_token)
         self.strategy = self.PROVIDER_STRATEGIES.get(self.provider, RateLimitStrategy.PER_MODEL)
-        self.manager = RotatingKeyManager(api_keys, self.provider, self.strategy, db_path)
+        self.manager = RotatingKeyManager(api_keys, self.provider, self.strategy, self.db)
         self._model_cache = {}
         self.console = Console()
 
@@ -727,11 +816,10 @@ class MultiProviderWrapper:
             actual = 0
             if m and hasattr(m, 'total_tokens') and m.total_tokens is not None:
                 actual = m.total_tokens
-            current_key = model_instance.api_key
             # Retrieve the estimate we set on the instance earlier
             estimate = getattr(model_instance, "_estimated_tokens", 1000)
             self.manager.record_usage(
-                api_key=current_key, 
+                key_obj=initial_key_usage,
                 model_id=model_id, 
                 actual_tokens=actual, 
                 estimated_tokens=estimate
