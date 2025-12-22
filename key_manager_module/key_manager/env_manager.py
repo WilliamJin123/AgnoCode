@@ -697,9 +697,9 @@ class MultiProviderWrapper:
         """Load API keys from environment variables"""
         if env_file:
             env_path = Path(env_file).resolve()
-            if not env_path.exists():
-                # print(f"Warning: The provided env_file '{env_path}' does not exist.")
-                logger.warning("The provided env_file '%s' does not exist.", env_path)
+            # if not env_path.exists():
+                 # print(f"Warning: The provided env_file '{env_path}' does not exist.")
+            #     logger.warning("The provided env_file '%s' does not exist.", env_path)
         else:
             env_path = Path.cwd() / ".env"
         load_dotenv(dotenv_path=env_path, override=True)
