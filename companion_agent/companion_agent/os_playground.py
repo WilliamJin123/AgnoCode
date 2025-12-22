@@ -8,7 +8,7 @@ aOs = AgentOS(
     id="companion_test_os",
     description="Companion Functionality Test",
     agents=[data_worker],
-
+    
 )
 app = aOs.get_app()
 

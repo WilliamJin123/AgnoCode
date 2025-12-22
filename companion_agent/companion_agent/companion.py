@@ -1,5 +1,7 @@
 import inspect
-from typing import Optional, AsyncIterator, Union, List, Dict, Any, Iterator
+import os
+import re
+from typing import AsyncGenerator, Optional, AsyncIterator, Union, List, Dict, Any, Iterator
 from agno.agent import Agent, RunOutput, RunOutputEvent
 from agno.team import Team
 from agno.workflow import Workflow
@@ -9,6 +11,7 @@ from key_manager import MultiProviderWrapper
 import sqlite3
 import asyncio
 import functools
+from functools import lru_cache
 
 
 AgnoWorker = Union[Agent, Team, Workflow]
@@ -19,9 +22,11 @@ class WithCompanionAgent:
         worker: AgnoWorker, 
         db_path: str = "companion_agent.db",
         instructions: Optional[Union[str, list]] = None,
-        model_settings: dict = {"id": "llama-3.3-70b", "provider": "cerebras"},
-        router_settings: dict = {"id": "llama-3.1-8b-instant", "provider": "groq"},
-        full_context_window: int = 2,  
+        model_settings: dict = {"id": "qwen-3-235b-a22b-instruct-2507", "provider": "cerebras"},
+        router_settings: dict = {"id": "qwen-3-32b", "provider": "cerebras"},
+        full_context_window: int = 2, 
+        model_wrapper: Optional[MultiProviderWrapper] = None,
+        router_wrapper: Optional[MultiProviderWrapper] = None, 
         **kwargs
     ):
         """
@@ -43,36 +48,41 @@ class WithCompanionAgent:
             router_settings (dict): Configuration for the high-speed Router LLM.
                 Must include 'id' and 'provider'.
                 Defaults to {"id": "llama-3.1-8b-instant", "provider": "groq"}.
+            model_wrapper (Optional[MultiProviderWrapper]): Pre-initialized wrapper for the main model.
+            router_wrapper (Optional[MultiProviderWrapper]): Pre-initialized wrapper for the router.
             **kwargs: Additional keyword arguments passed directly to the 
                 Companion Agent's constructor (e.g., markdown=True).
         """
-       
+        self.worker = worker
+
         self.full_context_buffer: List[Dict[str, str]] = []
         self.full_context_window = full_context_window
 
         # 1. Initialize SQLite for Summaries
-        self.db_path = db_path
+        self.db_path = os.path.abspath(db_path)
+        
         self._init_summary_db()
-        self.session_summaries = self._load_summaries()
-
-        self.worker = worker
-        p_name = model_settings["provider"].lower()
-        r_p_name = router_settings["provider"].lower()
-       
-        self.model_wrapper = MultiProviderWrapper.from_env(
-            provider=p_name,
-            default_model_id=model_settings["id"],
-            env_file=ENV_FILE
-            
-        )
-        self.router_wrapper = MultiProviderWrapper.from_env(
-            provider=r_p_name,
-            default_model_id=router_settings["id"],
-            env_file=ENV_FILE
-        )
 
         self.model_settings = model_settings 
         self.router_settings = router_settings
+        if model_wrapper:
+            self.model_wrapper = model_wrapper
+        else:
+            p_name = model_settings["provider"].lower()
+            self.model_wrapper = MultiProviderWrapper.from_env(
+                provider=p_name,
+                default_model_id=model_settings["id"],
+                env_file=ENV_FILE
+            )
+        if router_wrapper:
+            self.router_wrapper = router_wrapper
+        else:
+            r_p_name = router_settings["provider"].lower()
+            self.router_wrapper = MultiProviderWrapper.from_env(
+                provider=r_p_name,
+                default_model_id=router_settings["id"],
+                env_file=ENV_FILE
+            )
 
         router_model = self.router_wrapper.get_model(**self.router_settings)
         self.router_agent = Agent(model=router_model)
@@ -81,17 +91,18 @@ class WithCompanionAgent:
             model=self.model_wrapper.get_model(**self.model_settings),
             instructions=[
                 "You are a technical summarizer.",
-                "You will receive the 'existing_summaries' of the project as context.",
+                "You will receive the 'past_summaries' of the project as context.",
                 "Summarize the provided User Input and Worker Output into a single concise log entry.",
                 "Ensure your new summary flows logically from the existing summaries."
             ]
         )
 
         base_instructions = [
-            "You are a 'Sidecar Companion'. You are observing a conversation between "
-            "a User and a specialized AI Worker.",
-            "Explain the Worker's reasoning and clarify technical terms.",
-            "Do not perform the Worker's task; only explain it."
+            "ACT AS THE WORKER: You are a seamless extension of the primary AI Worker. ",
+            "Answer conceptual or clarifying questions about the task at hand "
+            "so the primary Worker's context remains focused on execution.",
+            "BE TRANSPARENT BUT INVISIBLE: Do not explain that you are a sidecar or a companion. "
+            "Just provide the clarification as if the Worker itself is answering a quick tangent."
         ]
         if instructions:
             if isinstance(instructions, str):
@@ -106,7 +117,7 @@ class WithCompanionAgent:
             description="A companion agent that answers questions without diluting agentic context",
             instructions=base_instructions,
 
-            db=SqliteDb(db_file=db_path, session_table="Companion Sessions"),
+            db=SqliteDb(db_file=db_path, session_table="companion_sessions"),
             add_history_to_context=True,
             
             **kwargs,
@@ -122,25 +133,34 @@ class WithCompanionAgent:
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS session_summaries (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id TEXT NOT NULL,
                     summary TEXT NOT NULL,
                     timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
                 )
             """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_session_id ON session_summaries(session_id)")
             conn.commit()
-
-    def _load_summaries(self) -> List[str]:
+    @lru_cache(maxsize=128)
+    def _load_summaries(self, session_id: str) -> List[str]:
         """Loads all past summaries from the DB."""
         with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.execute("SELECT summary FROM session_summaries ORDER BY id ASC")
+            cursor = conn.execute(
+                "SELECT summary FROM session_summaries WHERE session_id = ? ORDER BY id ASC", 
+                (session_id,)
+            )
             return [row[0] for row in cursor.fetchall()]
 
-    def _persist_summary(self, summary_text: str):
+    def _persist_summary(self, session_id: str, summary_text: str):
         """Writes a new summary to the DB."""
         with sqlite3.connect(self.db_path, ) as conn:
-            conn.execute("INSERT INTO session_summaries (summary) VALUES (?)", (summary_text,))
+            conn.execute(
+                "INSERT INTO session_summaries (session_id, summary) VALUES (?, ?)", 
+                (session_id, summary_text)
+            )
             conn.commit()
+        self._load_summaries.cache_clear()
 
-    def _generate_incremental_summary(self, turn: dict) -> str:
+    def _generate_incremental_summary(self, turn: dict, session_id: str) -> str:
         """
         Compresses a single turn (User Input + Worker Output) into a summary.
         """
@@ -148,8 +168,10 @@ class WithCompanionAgent:
             f"User: {turn['input']}\n"
             f"Worker: {turn['output']}\n"
         )
+        session_summaries = self._load_summaries(session_id)
+
         deps = {
-            "existing_summaries": self.session_summaries
+            "past_summaries": session_summaries
         }
 
         response = self.summarizer.run(
@@ -158,7 +180,7 @@ class WithCompanionAgent:
             add_dependencies_to_context=True
         )
         summary = str(response.content).strip()
-        self._persist_summary(summary)
+        self._persist_summary(session_id, summary)
         return summary
 
     def _update_worker_state(self, user_input: str, worker_output: str):
@@ -167,6 +189,7 @@ class WithCompanionAgent:
         1. If we have a 'last_turn', summarize it and add to permanent session history.
         2. Set the current interaction as the new 'last_turn' (full fidelity).
         """
+        session_id = getattr(self.worker, "session_id", "default_session")
         new_turn = {
             "input": user_input,
             "output": worker_output
@@ -174,11 +197,12 @@ class WithCompanionAgent:
         self.full_context_buffer.append(new_turn)
         if len(self.full_context_buffer) > self.full_context_window:
             oldest_turn = self.full_context_buffer.pop(0)
-            summary = self._generate_incremental_summary(oldest_turn)
-            self.session_summaries.append(summary)
+            _ = self._generate_incremental_summary(oldest_turn, session_id)
+            
 
     async def _aupdate_worker_state(self, user_input: str, worker_output: str):
         """Async version of state update to prevent blocking on summary generation."""
+        session_id = getattr(self.worker, "session_id", "default_session")
         new_turn = {
             "input": user_input,
             "output": worker_output
@@ -187,29 +211,41 @@ class WithCompanionAgent:
 
         if len(self.full_context_buffer) > self.full_context_window:
             oldest_turn = self.full_context_buffer.pop(0)
-            summary = await asyncio.to_thread(self._generate_incremental_summary, oldest_turn)
-            self.session_summaries.append(summary)
+            _ = await asyncio.to_thread(self._generate_incremental_summary, oldest_turn, session_id)
 
     def _get_companion_dependencies(self) -> Dict[str, Any]:
         """Constructs the dependency dictionary for the Companion."""
+        session_id = getattr(self.worker, "session_id", "default_session")
         return {
-            "summarized_history": self.session_summaries,
+            "summarized_history": self._load_summaries(session_id),
             "recent_context_window": self.full_context_buffer
         }
 
-    def _route_query(self, input: str) -> str:
+    def _route_query(self, _input: str) -> str:
         # Use a concise, high-contrast system prompt
         routing_prompt = (
-            "You are a routing logic gate. Categorize the user's message.\n"
-            "Respond with ONLY 'WORKER' or 'COMPANION'.\n"
-            "WORKER: Execution, Code, Data Analysis.\n"
-            "COMPANION: Questions, Definitions, Why, History.\n"
-            f"User message: '{input}'"
+            "Analyze the User message to determine the intended recipient.\n"
+            "Respond with ONLY 'WORKER' or 'COMPANION'.\n\n"
+            
+            "WORKER: Use if the user is giving instructions, correcting code, "
+            "requesting changes, or challenging a specific technical decision "
+            "made in the current task (e.g., 'Use X pattern instead').\n"
+            
+            "COMPANION: Use ONLY for general technical questions, definitions, "
+            "educational 'how-to' explanations, or history that does NOT "
+            "require the Worker to change its current output or logic.\n\n"
+            
+            f"User message: '{_input}'"
         )
         
         response = self.router_agent.run(input=routing_prompt)
-        decision = str(response.content).strip().upper()
-
+        content = str(response.content)
+        decision = re.sub(
+            r'<think>.*?</think>', 
+            '', 
+            content, 
+            flags=re.DOTALL | re.IGNORECASE
+        ).strip().upper()
         if "COMPANION" in decision:
             return "COMPANION"
         return "WORKER"
@@ -221,6 +257,9 @@ class WithCompanionAgent:
         
         if route == "COMPANION":
             deps = self._get_companion_dependencies()
+
+            kwargs.pop('dependencies', None)
+            kwargs.pop('add_dependencies_to_context', None)
 
             return self.companion.run(
                 input=input, 
@@ -239,6 +278,59 @@ class WithCompanionAgent:
             input, str(response.content).lower().strip())
         return response
 
+    async def _resolve_routing(self, input_text: str):
+        """
+        Decides whether to route to Companion or Worker.
+        Returns: (route_decision, clean_dependencies_flag)
+        """
+        route = await asyncio.to_thread(self._route_query, input_text)
+        return route
+
+    async def _arun_stream(self, input: str, *args, **kwargs) -> AsyncGenerator:
+
+        route = await self._resolve_routing(input)
+        if route == "COMPANION":
+            deps = self._get_companion_dependencies()
+            kwargs.pop('dependencies', None) # sidecar does not get worker-specific dependencies
+            
+            stream: AsyncGenerator = self.companion.arun(
+                input=input, dependencies=deps, *args, **kwargs
+            )
+            async for chunk in stream:
+                yield chunk
+            return
+        
+        result: AsyncGenerator = self._original_arun(input, *args, **kwargs)
+
+        input_text = kwargs.get('input') or input
+
+        async for chunk in self._astream_interceptor(input_text, result):
+            yield chunk
+
+    async def _arun_standard(self, input: str, *args, **kwargs) -> Any:
+
+        route = await self._resolve_routing(input)
+
+        if route == "COMPANION":
+            deps = self._get_companion_dependencies()
+            kwargs.pop('dependencies', None)
+            kwargs.pop("stream", None)
+
+            return await self.companion.arun(
+                input=input, dependencies=deps, stream=False, *args, **kwargs
+            )
+
+        # Delegate to Worker's standard run
+        result = self._original_arun(input, *args, **kwargs)
+        if inspect.isawaitable(result):
+            result = await result
+
+        # Log state
+        input_text = kwargs.get('input') or input
+        asyncio.create_task(self._aupdate_worker_state(input_text, str(result.content).lower().strip()))
+        
+        return result
+
     def _stream_interceptor(self, input_text: str, generator: Iterator[Any]) -> Iterator[Any]:
         """
         Yields tokens to the user while secretly buffering them.
@@ -247,58 +339,33 @@ class WithCompanionAgent:
         full_response_buffer = []
         
         for chunk in generator:
-            token = getattr(chunk, "content", None)
-            if token is None and isinstance(chunk, str):
-                token = chunk  
+            token = None
+            if hasattr(chunk, "content") and chunk.content is not None:
+                token = chunk.content
+            elif isinstance(chunk, str):
+                token = chunk     
             if token:
                 full_response_buffer.append(str(token))
-            
-            yield chunk  # Pass the data through to the user immediately
-
-        # Stream finished: reconstruct full text and update memory
-        full_text = "".join(full_response_buffer)
-        self._update_worker_state(input_text, full_text)
-
-    async def _patched_arun(self, input: str, *args, **kwargs) -> RunOutput:
-        """The asynchronous monkeypatch."""
-
-        route = await asyncio.to_thread(self._route_query, input)
-        is_streaming = kwargs.get("stream", False)
-
-        if route == "COMPANION":
-            deps = self._get_companion_dependencies()
-
-            return await self.companion.arun(
-                input=input,
-                dependencies=deps,
-                add_dependencies_to_context=True,
-                *args, 
-                **kwargs
-            )
-            
-        worker_response: Union[RunOutput, AsyncIterator[RunOutputEvent]] = await self._original_arun(input, *args, **kwargs)
-        if is_streaming:
-            return await self._astream_interceptor(input, worker_response)
-        
-        await self._aupdate_worker_state(
-            input, str(worker_response.content).lower().strip())
-        return worker_response
-
-    async def _astream_interceptor(self, input_text: str, generator: AsyncIterator[Any]) -> AsyncIterator[Any]:
-        full_response_buffer = []
-        
-        async for chunk in generator:
-            token = getattr(chunk, "content", None)
-            if token is None and isinstance(chunk, str):
-                token = chunk
-            
-            if token:
-                full_response_buffer.append(str(token))
-            
             yield chunk
 
         full_text = "".join(full_response_buffer)
-        await self._aupdate_worker_state(input_text, full_text)
+        self._update_worker_state(input_text, full_text)
+
+    async def _astream_interceptor(self, input_text: str, generator:    AsyncIterator[Any]) -> AsyncIterator[Any]:
+        full_response_buffer = []
+        
+        async for chunk in generator:
+            token = None
+            if hasattr(chunk, "content") and chunk.content is not None:
+                token = chunk.content
+            elif isinstance(chunk, str):
+                token = chunk     
+            if token:
+                full_response_buffer.append(str(token))
+            yield chunk
+        
+        full_text = "".join(full_response_buffer)
+        asyncio.create_task(self._aupdate_worker_state(input_text, full_text))
 
     def apply_patches(self):
         """Explicitly applies patches with functools.wraps logic."""
@@ -311,8 +378,14 @@ class WithCompanionAgent:
 
         # Async Patch (Critical for AgentOS)
         @functools.wraps(self.worker.arun)
-        async def wrapped_arun(*args, **kwargs):
-            return await self._patched_arun(*args, **kwargs)
-
-        self.worker.arun = wrapped_arun
+        def arun_dispatch(agent_self, *args, **kwargs):
+            input_val = kwargs.pop("input", None)
+            if input_val is None and args:
+                input_val = args[0]
+                args = args[1:]
+            if kwargs.get("stream", False):
+                return self._arun_stream(input_val, *args, **kwargs)
+            else:
+                return self._arun_standard(input_val, *args, **kwargs)
+        self.worker.arun = arun_dispatch.__get__(self.worker, type(self.worker))
         
