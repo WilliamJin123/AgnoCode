@@ -1,6 +1,7 @@
 from agno.agent import Agent
 from agno.team import Team
 from agno.db.sqlite import SqliteDb
+from agno.tracing import setup_tracing
 from agno.session import SessionSummaryManager
 from agno.compression import CompressionManager
 import os
@@ -143,6 +144,16 @@ agent_prompt=[
     "No strategic thinking. Just precise tool execution."
 ]
 
+db = SqliteDb(db_file="./db_linear.db", session_table="Linear Sessions", traces_table="Linear Traces")
+setup_tracing(
+    db=db,
+    batch_processing=True,
+    max_queue_size=2048,
+    max_export_batch_size=512,
+    schedule_delay_millis=5000,
+)
+
+
 def get_linear_agent( debug_mode = True, debug_level = 2, **kwargs):
     return Agent(
     name="Linear Architect",
@@ -160,7 +171,7 @@ def get_linear_agent( debug_mode = True, debug_level = 2, **kwargs):
     # instructions=agent_prompt,
     markdown=True,
     
-    db=SqliteDb(db_file="./db_linear.db", session_table="Linear Sessions"),
+    db=db,
     retries=3,
     delay_between_retries=1,
 
@@ -205,7 +216,7 @@ def get_linear_team( debug_mode = True, debug_level = 2, **kwargs):
         show_members_responses=True,
         markdown=True,
         
-        db=SqliteDb(db_file="./db_linear.db", session_table="Linear Sessions"),
+        db=db,
         retries=3,
         delay_between_retries=1,
 

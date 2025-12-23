@@ -6,6 +6,7 @@ from agno.agent import Agent, RunOutput, RunOutputEvent
 from agno.team import Team
 from agno.workflow import Workflow
 from agno.db.sqlite import SqliteDb
+from agno.tracing import setup_tracing
 from key_manager import MultiProviderWrapper
 
 import sqlite3
@@ -110,6 +111,14 @@ class WithCompanionAgent:
             else:
                 base_instructions.extend(instructions)
 
+        db = SqliteDb(db_file=db_path, session_table="companion_sessions", traces_table="companion_traces")
+        setup_tracing(
+            db=db,
+            batch_processing=True,
+            max_queue_size=2048,
+            max_export_batch_size=512,
+            schedule_delay_millis=5000,
+        )
         self.companion = Agent(
             model = self.model_wrapper.get_model( **self.model_settings),
             name="Companion Agent",
@@ -117,7 +126,7 @@ class WithCompanionAgent:
             description="A companion agent that answers questions without diluting agentic context",
             instructions=base_instructions,
 
-            db=SqliteDb(db_file=db_path, session_table="companion_sessions"),
+            db=db,
             add_history_to_context=True,
             
             **kwargs,

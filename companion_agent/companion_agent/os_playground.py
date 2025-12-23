@@ -8,7 +8,7 @@ aOs = AgentOS(
     id="companion_test_os",
     description="Companion Functionality Test",
     agents=[data_worker],
-    
+    tracing=True,
 )
 app = aOs.get_app()
 
@@ -17,7 +17,7 @@ if __name__ == "__main__":
         app="os_playground:app",
         port=7777,
         # workers=3,
-        reload=True
+        reload=True,
     )
 
 

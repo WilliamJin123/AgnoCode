@@ -2,6 +2,7 @@ import asyncio
 import sqlite3
 import time
 from agno.agent import Agent
+from agno.tracing import setup_tracing
 from key_manager import MultiProviderWrapper
 from companion import WithCompanionAgent
 from agno.db.sqlite import SqliteDb
@@ -17,8 +18,15 @@ data_worker = Agent(
     model=wrapper.get_model(),
     name="Data Engineer",
     instructions=["You are a python data engineer. Output concise python code only. Sign off all message with 'Signed by the Data Engineer'."],
-    db=SqliteDb(db_file=DB_FILE, session_table="data_worker-sessions")
+    db=SqliteDb(db_file=DB_FILE, session_table="data_worker_sessions", traces_table="data_worker_traces")
 )
+setup_tracing(
+            db=data_worker.db,
+            batch_processing=True,
+            max_queue_size=2048,
+            max_export_batch_size=512,
+            schedule_delay_millis=5000,
+        )
 
 print("--- Initializing Companion Agent ---")
 companion_system = WithCompanionAgent(

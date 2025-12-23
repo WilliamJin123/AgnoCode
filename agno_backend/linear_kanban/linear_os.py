@@ -17,8 +17,9 @@ agent_os = AgentOS(
         agents=[linear_agent],
         teams=[linear_team],
         id="notion_agent_os",
-        name="Notion Agent OS",  
-        # run_hooks_in_background=True, 
+        name="Notion Agent OS", 
+        tracing=True 
+        # run_hooks_in_background=True,
     )
 
 app = agent_os.get_app()
