@@ -8,11 +8,27 @@ from agno.workflow import Workflow
 from agno.db.sqlite import SqliteDb
 from agno.tracing import setup_tracing
 from key_manager import MultiProviderWrapper
+from tenacity import retry, stop_after_attempt, wait_exponential
 
-import sqlite3
 import asyncio
 import functools
 from functools import lru_cache
+from sqlalchemy import (
+    create_engine, 
+    text, 
+    MetaData, 
+    Table, 
+    Column, 
+    Integer, 
+    String, 
+    DateTime,
+    select,
+    insert,
+    func
+)
+from sqlalchemy.pool import StaticPool
+from sqlalchemy.orm import sessionmaker
+from contextlib import contextmanager
 
 
 AgnoWorker = Union[Agent, Team, Workflow]
@@ -62,6 +78,7 @@ class WithCompanionAgent:
         # 1. Initialize SQLite for Summaries
         self.db_path = os.path.abspath(db_path)
         
+        self._init_sqlalchemy_components()
         self._init_summary_db()
 
         self.model_settings = model_settings 
@@ -111,9 +128,9 @@ class WithCompanionAgent:
             else:
                 base_instructions.extend(instructions)
 
-        db = SqliteDb(db_file=db_path, session_table="companion_sessions", traces_table="companion_traces")
+        self.db = SqliteDb(db_file=db_path, session_table="companion_sessions", traces_table="companion_traces")
         setup_tracing(
-            db=db,
+            db=self.db,
             batch_processing=True,
             max_queue_size=2048,
             max_export_batch_size=512,
@@ -126,7 +143,7 @@ class WithCompanionAgent:
             description="A companion agent that answers questions without diluting agentic context",
             instructions=base_instructions,
 
-            db=db,
+            db=self.db,
             add_history_to_context=True,
             
             **kwargs,
@@ -136,38 +153,70 @@ class WithCompanionAgent:
         self._original_arun = self.worker.arun
         self.apply_patches()
 
+    def _init_sqlalchemy_components(self):
+        """Initialize SQLAlchemy engine, metadata, and session factory once."""
+        self.db_path = os.path.abspath(self.db_path)
+        
+        self.engine = create_engine(
+            f"sqlite:///{self.db_path}",
+            poolclass=StaticPool,
+            connect_args={"check_same_thread": False},
+            echo=False  # SQL logging
+        )
+        
+        # Create metadata and table definition
+        self.metadata = MetaData()
+        self.session_summaries_table = Table(
+            'session_summaries',
+            self.metadata,
+            Column('id', Integer, primary_key=True, autoincrement=True),
+            Column('session_id', String, nullable=False, index=True),
+            Column('summary', String, nullable=False),
+            Column('timestamp', DateTime, server_default=func.now())
+        )
+        
+        # Create session factory
+        self.SessionLocal = sessionmaker(bind=self.engine)
+
     def _init_summary_db(self):
         """Creates the summary table if it doesn't exist."""
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS session_summaries (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    session_id TEXT NOT NULL,
-                    summary TEXT NOT NULL,
-                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_session_id ON session_summaries(session_id)")
-            conn.commit()
+        self.metadata.create_all(self.engine)
+
+    @contextmanager
+    def _get_db_session(self):
+        """Context manager for database sessions."""
+        session = self.SessionLocal()
+        try:
+            yield session
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+
     @lru_cache(maxsize=128)
     def _load_summaries(self, session_id: str) -> List[str]:
         """Loads all past summaries from the DB."""
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.execute(
-                "SELECT summary FROM session_summaries WHERE session_id = ? ORDER BY id ASC", 
-                (session_id,)
+        with self._get_db_session() as session:
+            result = session.execute(
+                select(self.session_summaries_table.c.summary)
+                .where(self.session_summaries_table.c.session_id == session_id)
+                .order_by(self.session_summaries_table.c.id)
             )
-            return [row[0] for row in cursor.fetchall()]
+            return [row[0] for row in result.fetchall()]
 
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
     def _persist_summary(self, session_id: str, summary_text: str):
         """Writes a new summary to the DB."""
-        with sqlite3.connect(self.db_path, ) as conn:
-            conn.execute(
-                "INSERT INTO session_summaries (session_id, summary) VALUES (?, ?)", 
-                (session_id, summary_text)
+        with self._get_db_session() as session:
+            session.execute(
+                insert(self.session_summaries_table).values(
+                    session_id=session_id,
+                    summary=summary_text
+                )
             )
-            conn.commit()
-        self._load_summaries.cache_clear()
+            self._load_summaries.cache_clear()
 
     def _generate_incremental_summary(self, turn: dict, session_id: str) -> str:
         """
