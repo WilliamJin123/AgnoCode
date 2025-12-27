@@ -4,7 +4,7 @@ from typing import Dict
 from agno.agent import Agent
 # Note: Specific model imports (Cerebras, Groq, etc.) are no longer 
 # strictly required here as MultiProviderWrapper handles the dynamic import.
-from env_manager import MultiProviderWrapper 
+from key_manager import MultiProviderWrapper 
 
 from dotenv import load_dotenv
 

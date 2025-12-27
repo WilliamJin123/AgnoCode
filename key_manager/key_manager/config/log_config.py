@@ -48,3 +48,6 @@ LOGGING_CONFIG = {
 
 def configure_logging():
     logging.config.dictConfig(LOGGING_CONFIG)
+
+configure_logging()
+default_logger = logging.getLogger(__name__)
